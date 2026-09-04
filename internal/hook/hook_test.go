@@ -447,3 +447,112 @@ func TestSessionStartClearResetsState(t *testing.T) {
 		t.Errorf("state = %q, want %q after /clear", got.State, store.StateDone)
 	}
 }
+
+// Every hook event carries cwd, and a session first seen at a Stop — one
+// already running when brd was installed, or resumed with --resume — must
+// still get a repo. Measured on the live board: 2 of 3 items had none.
+func TestIdentityComesFromAnyEvent(t *testing.T) {
+	events := []Event{
+		{HookEventName: "Stop", Cwd: "/tmp", BackgroundTasks: nil},
+		{HookEventName: "Notification", Cwd: "/tmp", NotificationType: "idle_prompt"},
+		{HookEventName: "SubagentStart", Cwd: "/tmp", AgentID: "a1", AgentType: "Explore"},
+	}
+	for _, ev := range events {
+		t.Run(ev.HookEventName, func(t *testing.T) {
+			db := open(t)
+			apply(t, db, ev)
+			got := only(t, db)
+			if got.Cwd == "" {
+				t.Errorf("%s left cwd empty", ev.HookEventName)
+			}
+			if got.Repo == "" {
+				t.Errorf("%s left repo empty", ev.HookEventName)
+			}
+		})
+	}
+}
+
+// An event without cwd must not blank out identity a previous event set.
+func TestIdentityIsNotErasedByAnEventWithoutCwd(t *testing.T) {
+	db := open(t)
+	apply(t, db,
+		Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp", Prompt: "go"},
+		Event{HookEventName: "Notification", NotificationType: "idle_prompt"}, // no cwd
+	)
+	if got := only(t, db); got.Cwd == "" {
+		t.Error("a cwd-less event erased the item's cwd")
+	}
+}
+
+// UserPromptSubmit also fires for prompts the harness generates — a background
+// task finishing, a cron firing. Those advance the turn but must not name the
+// item: the live board titled one "<task-notification>" minutes after install.
+func TestSyntheticPromptsDoNotNameTheItem(t *testing.T) {
+	synthetic := []string{
+		"<task-notification>",
+		"<task-notification>\n<task-id>abc</task-id>",
+		"<system-reminder>something happened</system-reminder>",
+		"<local-command-stdout>output</local-command-stdout>",
+		"<command-message>skill running</command-message>",
+		"<command-name>/loop</command-name>",
+		"Caveat: The messages below were generated while running",
+	}
+	for _, prompt := range synthetic {
+		t.Run(firstLine(prompt, 24), func(t *testing.T) {
+			db := open(t)
+			apply(t, db,
+				Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp",
+					Prompt: "실제 사용자 요청"},
+				Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp", Prompt: prompt},
+			)
+			got := only(t, db)
+			if got.Title != "실제 사용자 요청" {
+				t.Errorf("title = %q, want the real prompt", got.Title)
+			}
+			if got.Subject != "실제 사용자 요청" {
+				t.Errorf("subject = %q, want the real prompt", got.Subject)
+			}
+			// It is still a turn, and the session is still working.
+			if got.State != store.StateWorking {
+				t.Errorf("state = %q, want %q", got.State, store.StateWorking)
+			}
+			if got.Turns != 2 {
+				t.Errorf("turns = %d, want 2 — a synthetic prompt is still a turn", got.Turns)
+			}
+		})
+	}
+}
+
+// A session whose *first* prompt is synthetic has no name yet. It must show
+// up on the board anyway rather than being dropped.
+func TestSyntheticFirstPromptStillCreatesTheItem(t *testing.T) {
+	db := open(t)
+	apply(t, db, Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp",
+		Prompt: "<task-notification>"})
+	got := only(t, db)
+	if got.State != store.StateWorking {
+		t.Errorf("state = %q, want %q", got.State, store.StateWorking)
+	}
+	if got.Title != "" {
+		t.Errorf("title = %q, want empty until a real prompt arrives", got.Title)
+	}
+}
+
+// A real prompt that merely mentions one of these markers is not synthetic —
+// only a prompt that opens with one is.
+func TestRealPromptsAreNotMistakenForSynthetic(t *testing.T) {
+	real := []string{
+		"<task-notification> 은 왜 제목이 되는거야",
+		"system-reminder 태그를 어떻게 걸러?",
+		"Caveat emptor",
+	}
+	for _, prompt := range real {
+		t.Run(firstLine(prompt, 24), func(t *testing.T) {
+			db := open(t)
+			apply(t, db, Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp", Prompt: prompt})
+			if got := only(t, db); got.Title != prompt {
+				t.Errorf("title = %q, want %q", got.Title, prompt)
+			}
+		})
+	}
+}
