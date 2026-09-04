@@ -5,11 +5,11 @@ hook events.
 
 ```
 brd  2 waiting on you · 3 live
-Blocked 2                    │Working 1                    │Background 2                 │Done 1
-▌ PR 리뷰 코멘트를 반영해줘   │  칸반 보드 리서치부터 해보자  │  hybrid 검색 벤치마크         │  audit_log 시크릿 정리
-  ghx 12m permission_prompt  │  brd 40s                    │  kmd 8m shell subagent×2    │  delight-ops-k8s 2h0m
-  istiod 업그레이드 롤아웃    │                             │  배포 상태 계속 지켜봐줘      │
-  ops-k8s 3m agent_needs_input│                            │  tweb 22m cron              │
+Blocked 2                  │Working 1                  │Background 2               │Done 1
+▌ apply the review comments│  research kanban boards   │  benchmark hybrid search  │  clean up stale secrets
+  ghx 12m permission_prompt│  brd 40s                  │  kmd 8m shell subagent×2  │  dots 2h0m
+  plan the addon rollout   │                           │  watch the deploy         │
+  tweb 3m agent_needs_input│                           │  okx 22m cron             │
 
 hjkl move · ↵ detail · r refresh · q quit
 ```
@@ -17,8 +17,8 @@ hjkl move · ↵ detail · r refresh · q quit
 ## Why
 
 With a dozen sessions open, the question that costs the most time is *which
-one is waiting on me, and what for?* `twm` answers the first half from tmux
-state. brd answers both, and adds the half neither can see: whether a session
+one is waiting on me, and what for?* A tmux dashboard can answer the first
+half. brd answers both, and adds the half neither can see: whether a session
 that stopped talking is **finished** or **parked on its own background work**.
 
 ## The agent is never asked to report
@@ -127,7 +127,7 @@ a busy timeout — hooks from unrelated sessions write concurrently, and a lost
 state transition is the one failure that makes the whole board untrustworthy.
 
 The board shows the last 24 hours. Older sessions are history, and history
-belongs in [`ccx`](https://github.com/sendbird/ccx).
+belongs in a session browser.
 
 ## What brd is not
 
@@ -136,13 +136,15 @@ belongs in [`ccx`](https://github.com/sendbird/ccx).
   and later ([tools-reference][ttools]), so on this machine that surface is
   empty. `~/.claude/tasks/<session>/` is a possible import source, never the
   store.
-- **Not a session browser.** `ccx` reads transcripts, agent hierarchies and
-  stats. brd shows only what is in flight right now.
+- **Not a session browser.** Reading transcripts, agent hierarchies and stats
+  is a different tool's job. brd shows only what is in flight right now.
 - **Not an orchestrator.** It starts nothing and stops nothing.
 
 ## Related
 
-`ghx` (PRs) · `tmc` (tmux workspace) · `ccx` (sessions) · brd (work in flight)
+brd is one axis — work in flight. Sibling tools cover the others:
+[`ghx`](https://github.com/keyolk/ghx) for pull requests,
+[`tmc`](https://github.com/keyolk/tmc) for the tmux workspace.
 
 [kaban]: https://kaban-board.github.io/kaban/
 [flux]: https://paddo.dev/blog/flux-kanban-for-ai-agents/

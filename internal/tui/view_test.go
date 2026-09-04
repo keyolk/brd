@@ -36,9 +36,9 @@ func TestNoLineExceedsTerminalWidth(t *testing.T) {
 		item("s1", "/src/keyolk/ghx", "PR 리뷰 코멘트를 반영해줘", store.StateWaiting, "permission_prompt"),
 		item("s2", "/src/keyolk/brd", "아주 긴 제목을 넣어서 잘리는지 확인한다 그리고 더 길게 이어서 씁니다 계속",
 			store.StateWorking, ""),
-		item("s3", "/src/sendbird/ops-k8s", "istiod", store.StateBackground, "",
+		item("s3", "/src/keyolk/tweb", "deploy", store.StateBackground, "",
 			store.Child{Kind: "shell", Ref: "t1", Label: "go test ./... -race", State: "running"}),
-		item("s4", "/src/keyolk/tweb", "deploy watch", store.StateDone, ""),
+		item("s4", "/src/keyolk/okx", "watch", store.StateDone, ""),
 	}
 	for _, w := range widths {
 		m := board(w, 24, items...)
