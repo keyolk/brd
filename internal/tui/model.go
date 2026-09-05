@@ -10,10 +10,12 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/keyolk/brd/internal/pulls"
 	"github.com/keyolk/brd/internal/store"
 )
 
@@ -47,8 +49,20 @@ type tickMsg time.Time
 
 type loadedMsg struct {
 	items []store.Item
+	pulls []store.Pull
 	err   error
 }
+
+// pollMsg carries the outcome of one PR poll.
+type pollMsg struct{ err error }
+
+// pollInterval is how often the board asks GitHub about the PRs it tracks.
+//
+// Far slower than the board's own refresh, because the two answer different
+// clocks: hooks land in seconds, while a review lands whenever a person gets
+// to it. One minute keeps a merge visible soon after it happens without
+// spending a gh call every couple of seconds.
+const pollInterval = 60 * time.Second
 
 // Model is the board.
 type Model struct {
@@ -58,14 +72,20 @@ type Model struct {
 	col    int // focused column
 	row    int // cursor within the focused column
 	w, h   int
-	detail bool // detail pane open for the selected item
+	detail bool   // detail pane open for the selected item
+	group  bool   // group items by JIRA ticket
+	status string // transient feedback for an action that had nothing to say
+	pulls  []store.Pull
+	// polling guards against stacking gh calls when one runs long: the timer
+	// keeps firing regardless of how slow the network is.
+	polling bool
 }
 
 // New builds the board model.
 func New(db *store.DB) Model { return Model{db: db} }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.load(), tick())
+	return tea.Batch(m.load(), tick(), pollTick())
 }
 
 func tick() tea.Cmd {
@@ -75,9 +95,27 @@ func tick() tea.Cmd {
 func (m Model) load() tea.Cmd {
 	return func() tea.Msg {
 		items, err := m.db.Items(window)
-		return loadedMsg{items: items, err: err}
+		if err != nil {
+			return loadedMsg{err: err}
+		}
+		prs, err := m.db.Pulls()
+		return loadedMsg{items: items, pulls: prs, err: err}
 	}
 }
+
+// poll refreshes PR state in the background. It reads the items it was given
+// rather than the live model so it cannot race the next refresh.
+func (m Model) poll() tea.Cmd {
+	items := m.items
+	db := m.db
+	return func() tea.Msg { return pollMsg{err: pulls.Poll(db, items)} }
+}
+
+func pollTick() tea.Cmd {
+	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollTimerMsg{} })
+}
+
+type pollTimerMsg struct{}
 
 // inColumn returns the items in column i, in board order.
 func (m Model) inColumn(i int) []store.Item {
@@ -90,6 +128,18 @@ func (m Model) inColumn(i int) []store.Item {
 		if it.Column() == want {
 			out = append(out, it)
 		}
+	}
+	if m.group {
+		// Ticketed items first, grouped together; the rest keep recency order
+		// below them. A stable sort is required — within one ticket, recency
+		// is still the order that makes sense.
+		sort.SliceStable(out, func(a, b int) bool {
+			ta, tb := out[a].Ticket, out[b].Ticket
+			if (ta == "") != (tb == "") {
+				return ta != ""
+			}
+			return ta < tb
+		})
 	}
 	return out
 }
@@ -111,8 +161,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(m.load(), tick())
 
+	case pollTimerMsg:
+		if m.polling || len(m.items) == 0 {
+			return m, pollTick()
+		}
+		m.polling = true
+		return m, tea.Batch(m.poll(), pollTick())
+
+	case pollMsg:
+		m.polling = false
+		if msg.err != nil {
+			// A PR poll failing is not a broken board — gh may simply not be
+			// logged in — so it goes to the status line, not m.err.
+			m.status = msg.err.Error()
+		}
+		return m, m.load()
+
 	case loadedMsg:
-		m.items, m.err = msg.items, msg.err
+		m.items, m.pulls, m.err = msg.items, msg.pulls, msg.err
 		// The cursor is an index into a list that just changed under it. A
 		// session moving from Working to Blocked shortens the column it left,
 		// and leaving the row where it was would select a different item —
@@ -126,6 +192,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail = false
 		}
 		return m, nil
+
+	case jumpMsg:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+		}
+		return m, m.load()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -166,6 +238,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if _, ok := m.selected(); ok {
 			m.detail = !m.detail
 		}
+
+	case "t":
+		// Group by ticket. Off by default: it only helps once several
+		// sessions share one, and a board of ungrouped items reads worse
+		// with a header above every single row.
+		m.group = !m.group
+		m.row = 0
+
+	case "J":
+		// Capital J, so it cannot be hit while navigating with j.
+		if it, ok := m.selected(); ok {
+			if _, live := paneFor(it.ID); !live {
+				m.status = "no live tmux pane — R resumes it instead"
+				return m, nil
+			}
+			m.status = ""
+			return m, jump(it.ID)
+		}
+
+	case "R":
+		if it, ok := m.selected(); ok {
+			m.status = ""
+			return m, resume(it)
+		}
+
 	case "r":
 		return m, m.load()
 	}
@@ -224,4 +321,88 @@ func truncate(s string, w int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes) + "…"
+}
+
+// pullsFor returns the PRs belonging to an item.
+//
+// A ticket matches first and matches broadly — that is the point of grouping
+// by one, since several sessions and several PRs share it. Without a ticket,
+// the branch is the only link, and it is exact.
+func (m Model) pullsFor(it store.Item) []store.Pull { return PullsFor(it, m.pulls) }
+
+// PullsFor is the item↔PR join, exported so `brd ls` matches the TUI exactly.
+func PullsFor(it store.Item, all []store.Pull) []store.Pull {
+	var out []store.Pull
+	for _, p := range all {
+		switch {
+		case it.Ticket != "" && p.Ticket == it.Ticket:
+		case it.Branch != "" && p.Branch == it.Branch:
+		default:
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// PullBadge is the one-glance summary of an item's PRs.
+//
+// It shows the PR that most needs the user, not the newest: a failing check on
+// an older PR matters more than a green one opened since. Merged PRs are shown
+// only when nothing else is open, because "it landed" is the answer you want
+// right after a session goes quiet.
+func PullBadge(prs []store.Pull) (text string, attention bool) {
+	if len(prs) == 0 {
+		return "", false
+	}
+	var open, merged []store.Pull
+	for _, p := range prs {
+		switch p.State {
+		case "OPEN":
+			open = append(open, p)
+		case "MERGED":
+			merged = append(merged, p)
+		}
+	}
+	if len(open) == 0 {
+		if len(merged) > 0 {
+			return fmt.Sprintf("#%d merged", merged[0].Number), false
+		}
+		return "", false
+	}
+	pick := open[0]
+	for _, p := range open {
+		if p.Attention() {
+			pick = p
+			break
+		}
+	}
+	label := fmt.Sprintf("#%d", pick.Number)
+	switch {
+	case pick.Checks == "failing":
+		return label + " checks failing", true
+	case pick.Review == "CHANGES_REQUESTED":
+		return label + " changes requested", true
+	case pick.Review == "APPROVED":
+		return label + " approved", false
+	case pick.Checks == "pending":
+		return label + " checks running", false
+	}
+	return label + " in review", false
+}
+
+// sharedTickets reports whether any ticket covers more than one item — the
+// only situation where grouping changes what the board looks like.
+func (m Model) sharedTickets() bool {
+	seen := map[string]bool{}
+	for _, it := range m.items {
+		if it.Ticket == "" {
+			continue
+		}
+		if seen[it.Ticket] {
+			return true
+		}
+		seen[it.Ticket] = true
+	}
+	return false
 }

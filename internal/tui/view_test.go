@@ -70,14 +70,39 @@ func TestNarrowBoardCollapsesToOneColumn(t *testing.T) {
 
 // The reason an item is blocked is the actionable half. A card that shows
 // only an age says nothing the user can act on.
+//
+// The reason is rendered in words, not as the raw notification_type: the raw
+// values read like internals, and "idle_prompt" — by far the most common one
+// on a real board — sounds like a fault when it only means the session is
+// waiting for the next instruction.
 func TestBlockedCardShowsWhy(t *testing.T) {
 	it := item("s1", "/src/keyolk/ghx", "review comments", store.StateWaiting, "permission_prompt")
 	out := board(140, 20, it).View()
-	if !strings.Contains(out, "permission_prompt") {
+	if !strings.Contains(out, "needs permission") {
 		t.Errorf("blocked card omitted its reason:\n%s", out)
+	}
+	if strings.Contains(out, "permission_prompt") {
+		t.Errorf("blocked card leaked the raw notification type:\n%s", out)
 	}
 	if !strings.Contains(out, "waiting on you") {
 		t.Errorf("header omitted the blocked count:\n%s", out)
+	}
+}
+
+// An age says how stale something is; a clock time says when it happened.
+// "Did this stall before or after lunch" needs the second one.
+func TestCardShowsWhenTheStateWasEntered(t *testing.T) {
+	it := item("s1", "/src/keyolk/ghx", "review comments", store.StateWaiting, "idle_prompt")
+	out := board(140, 20, it).View()
+	want := Stamp(it.StateSince)
+	if want == "" {
+		t.Fatal("Stamp returned nothing for a live item")
+	}
+	if !strings.Contains(out, want) {
+		t.Errorf("card omitted the timestamp %q:\n%s", want, out)
+	}
+	if !strings.Contains(out, ShortAge(it.Age())) {
+		t.Errorf("card omitted the age:\n%s", out)
 	}
 }
 
@@ -256,3 +281,215 @@ func TestTruncateIsRuneSafe(t *testing.T) {
 // Thin wrappers so the assertions read as intent rather than as library calls.
 func lipglossWidth(s string) int { return lipgloss.Width(s) }
 func utf8Valid(s string) bool    { return utf8.ValidString(s) }
+
+// Naming an item from its prompt produced 6 unreadable titles out of 14 on a
+// live board. These are the exact shapes that failed.
+func TestUnreadableSubjectsAreNotUsedAsNames(t *testing.T) {
+	unreadable := []string{
+		"cf50469d-8961-4edf-a8e1-10d6e39ce325",
+		"https://example.slack.com/archives/C0A/p1788538434599539",
+		"/sb:pr-followup",
+		"<cross-session-message from=\"uds:/tmp/cc-socks/26916.sock\">",
+		"   ",
+	}
+	for _, subject := range unreadable {
+		t.Run(subject[:min(len(subject), 24)], func(t *testing.T) {
+			it := store.Item{ID: "abc12345-0000-0000-0000-000000000000", Subject: subject}
+			got := Label(it)
+			if got == subject {
+				t.Errorf("Label used an unreadable subject: %q", got)
+			}
+			if got != "abc12345" {
+				t.Errorf("Label = %q, want the short session id", got)
+			}
+		})
+	}
+}
+
+// The ai-title Claude Code writes for itself describes what the session is
+// about; the prompt describes one turn of it. Every sampled session had one.
+func TestTitleBeatsSubject(t *testing.T) {
+	it := store.Item{ID: "s1", Title: "usw2 coder workspace proxy check",
+		Subject: "해줘"}
+	if got := Label(it); got != "usw2 coder workspace proxy check" {
+		t.Errorf("Label = %q, want the ai-title", got)
+	}
+}
+
+// A ticket prefix is what makes sessions on one piece of work recognizable
+// before you group them.
+func TestTicketPrefixesTheName(t *testing.T) {
+	it := store.Item{ID: "s1", Ticket: "CPLAT-11964", Title: "bump the chart"}
+	if got := Label(it); got != "CPLAT-11964 bump the chart" {
+		t.Errorf("Label = %q, want the ticket prefixed", got)
+	}
+	// Not twice, when the title already names it.
+	it.Title = "CPLAT-11964: bump the chart"
+	if got := Label(it); got != "CPLAT-11964: bump the chart" {
+		t.Errorf("Label = %q, want no duplicate ticket", got)
+	}
+}
+
+func TestStampDistinguishesToday(t *testing.T) {
+	recent := time.Now().Add(-2 * time.Hour)
+	if got := Stamp(recent); len(got) != 5 {
+		t.Errorf("Stamp(recent) = %q, want HH:MM", got)
+	}
+	old := time.Now().Add(-30 * time.Hour)
+	if got := Stamp(old); len(got) <= 5 {
+		t.Errorf("Stamp(old) = %q, want a date too — the clock alone is ambiguous", got)
+	}
+	if got := Stamp(time.Time{}); got != "" {
+		t.Errorf("Stamp(zero) = %q, want empty", got)
+	}
+}
+
+// Raw notification types read like internals. idle_prompt is the most common
+// value on a real board and sounds like a fault when it is not one.
+func TestBlockedLabelsAreInWords(t *testing.T) {
+	cases := map[string]string{
+		"idle_prompt":            "awaiting input",
+		"permission_prompt":      "needs permission",
+		"agent_needs_input":      "agent needs input",
+		"elicitation_dialog":     "needs a reply",
+		"something_unmapped_yet": "something_unmapped_yet",
+	}
+	for in, want := range cases {
+		if got := BlockedLabel(in); got != want {
+			t.Errorf("BlockedLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The badge must surface the PR that needs the user, not the newest one.
+func TestPullBadgePicksWhatNeedsAttention(t *testing.T) {
+	cases := []struct {
+		name      string
+		prs       []store.Pull
+		want      string
+		attention bool
+	}{
+		{"none", nil, "", false},
+		{"failing beats a newer green one", []store.Pull{
+			{Number: 10, State: "OPEN", Checks: "passing", Review: "APPROVED"},
+			{Number: 9, State: "OPEN", Checks: "failing"},
+		}, "#9 checks failing", true},
+		{"changes requested", []store.Pull{
+			{Number: 7, State: "OPEN", Review: "CHANGES_REQUESTED", Checks: "passing"},
+		}, "#7 changes requested", true},
+		{"approved is good news", []store.Pull{
+			{Number: 5, State: "OPEN", Review: "APPROVED", Checks: "passing"},
+		}, "#5 approved", false},
+		{"pending", []store.Pull{
+			{Number: 4, State: "OPEN", Checks: "pending"},
+		}, "#4 checks running", false},
+		{"merged shows only when nothing is open", []store.Pull{
+			{Number: 3, State: "MERGED"},
+		}, "#3 merged", false},
+		{"an open PR outranks a merged one", []store.Pull{
+			{Number: 3, State: "MERGED"},
+			{Number: 4, State: "OPEN", Checks: "passing"},
+		}, "#4 in review", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, attention := PullBadge(tc.prs)
+			if got != tc.want {
+				t.Errorf("pullBadge = %q, want %q", got, tc.want)
+			}
+			if attention != tc.attention {
+				t.Errorf("attention = %v, want %v", attention, tc.attention)
+			}
+		})
+	}
+}
+
+// A PR matches an item by ticket when there is one, by branch otherwise.
+func TestPullsAreMatchedByTicketThenBranch(t *testing.T) {
+	m := Model{pulls: []store.Pull{
+		{Number: 1, Ticket: "CPLAT-1", Branch: "CPLAT-1/a"},
+		{Number: 2, Ticket: "CPLAT-1", Branch: "CPLAT-1/b"},
+		{Number: 3, Ticket: "", Branch: "follow-the-work"},
+	}}
+
+	ticketed := store.Item{Ticket: "CPLAT-1", Branch: "CPLAT-1/a"}
+	if got := m.pullsFor(ticketed); len(got) != 2 {
+		t.Errorf("ticketed item matched %d PRs, want both on the ticket", len(got))
+	}
+	untickted := store.Item{Branch: "follow-the-work"}
+	got := m.pullsFor(untickted)
+	if len(got) != 1 || got[0].Number != 3 {
+		t.Errorf("branch match = %+v, want only #3", got)
+	}
+	if n := len(m.pullsFor(store.Item{})); n != 0 {
+		t.Errorf("an item with no ticket or branch matched %d PRs, want 0", n)
+	}
+}
+
+// Grouping brings ticketed items together without scrambling recency inside
+// a ticket or promoting untickted ones.
+func TestGroupingOrdersByTicketAndKeepsRecency(t *testing.T) {
+	mk := func(id, ticket string) store.Item {
+		return store.Item{ID: id, Ticket: ticket, State: store.StateDone}
+	}
+	m := Model{items: []store.Item{
+		mk("a", "CPLAT-2"), mk("b", ""), mk("c", "CPLAT-1"),
+		mk("d", "CPLAT-2"), mk("e", ""),
+	}, group: true}
+
+	var ids []string
+	for _, it := range m.inColumn(3) { // Done
+		ids = append(ids, it.ID)
+	}
+	want := []string{"c", "a", "d", "b", "e"}
+	if strings.Join(ids, "") != strings.Join(want, "") {
+		t.Errorf("grouped order = %v, want %v", ids, want)
+	}
+}
+
+// The t key must not be offered when nothing shares a ticket — grouping would
+// visibly do nothing.
+func TestGroupKeyOnlyOfferedWhenTicketsAreShared(t *testing.T) {
+	lone := Model{items: []store.Item{
+		{ID: "a", Ticket: "CPLAT-1", State: store.StateDone},
+		{ID: "b", Ticket: "CPLAT-2", State: store.StateDone},
+	}, w: 140}
+	if h := lone.renderHints(); strings.Contains(h, "t group") {
+		t.Errorf("offered grouping with no shared ticket: %q", h)
+	}
+	shared := lone
+	shared.items = append(shared.items, store.Item{ID: "c", Ticket: "CPLAT-1",
+		State: store.StateDone})
+	if h := shared.renderHints(); !strings.Contains(h, "t group") {
+		t.Errorf("did not offer grouping when a ticket is shared: %q", h)
+	}
+}
+
+// A failed action must say so where the user is looking, and outrank the keys.
+func TestStatusReplacesTheHintBar(t *testing.T) {
+	m := Model{items: []store.Item{{ID: "a", State: store.StateDone}},
+		w: 140, status: "no live tmux pane — R resumes it instead"}
+	h := m.renderHints()
+	if !strings.Contains(h, "no live tmux pane") {
+		t.Errorf("status not shown: %q", h)
+	}
+	if strings.Contains(h, "q quit") {
+		t.Errorf("keys shown alongside a status message: %q", h)
+	}
+}
+
+func TestResumeRunsTheSessionInItsOwnCwd(t *testing.T) {
+	it := store.Item{ID: "abc-123", Cwd: "/src/keyolk/brd"}
+	argv := resumeCmd(it)
+	want := []string{"claude", "--resume", "abc-123"}
+	if strings.Join(argv, " ") != strings.Join(want, " ") {
+		t.Errorf("resumeCmd = %v, want %v", argv, want)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

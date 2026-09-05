@@ -62,11 +62,42 @@ CREATE TABLE IF NOT EXISTS items (
   turns        INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
-  state_since  INTEGER NOT NULL    -- when the current state was entered
+  state_since  INTEGER NOT NULL,   -- when the current state was entered
+  -- Ticket and branch are read from the session's checkout on every event.
+  -- The branch is the only place a ticket is guaranteed to appear (the PR
+  -- guard requires it there), and it moves during a session, so both are
+  -- refreshed rather than fixed at creation.
+  ticket       TEXT NOT NULL DEFAULT '',
+  branch       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS items_repo_state ON items(repo, state);
 CREATE INDEX IF NOT EXISTS items_updated ON items(updated_at DESC);
+CREATE INDEX IF NOT EXISTS items_ticket ON items(ticket) WHERE ticket != '';
+
+-- Pull requests discovered for a ticket or branch.
+--
+-- Written by the TUI's poller, never by a hook: the gh CLI takes about a
+-- second per call, and a hook that slow would tax every turn boundary in
+-- every session.
+-- A PR also changes outside any session — someone reviews it while nothing is
+-- running — so a turn boundary is the wrong clock for it anyway.
+CREATE TABLE IF NOT EXISTS pulls (
+  repo       TEXT NOT NULL,        -- owner/name on the remote, not a local path
+  number     INTEGER NOT NULL,
+  ticket     TEXT NOT NULL,
+  branch     TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  state      TEXT NOT NULL,        -- OPEN | MERGED | CLOSED
+  review     TEXT NOT NULL,        -- APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED
+  checks     TEXT NOT NULL,        -- passing | failing | pending | none
+  url        TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,     -- PR's own updatedAt, not when we polled
+  fetched_at INTEGER NOT NULL,
+  PRIMARY KEY (repo, number)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS pulls_ticket ON pulls(ticket) WHERE ticket != '';
 
 -- Live children of an item: background tasks and subagents.
 --

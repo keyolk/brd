@@ -27,6 +27,8 @@ type Item struct {
 	LastMessage string
 	Model       string
 	Turns       int
+	Ticket      string
+	Branch      string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StateSince  time.Time
@@ -79,6 +81,8 @@ type Upsert struct {
 	BlockedOn   *string
 	LastMessage *string
 	Model       *string
+	Ticket      *string
+	Branch      *string
 	BumpTurn    bool
 }
 
@@ -101,12 +105,13 @@ func (d *DB) Apply(u Upsert) (string, error) {
 		state := deref(u.State, StateWorking)
 		_, err = tx.Exec(`
 			INSERT INTO items (id, repo, cwd, title, subject, state, blocked_on,
-			                   last_message, model, turns, created_at, updated_at, state_since)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			                   last_message, model, turns, created_at, updated_at,
+			                   state_since, ticket, branch)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			u.ID, deref(u.Repo, ""), deref(u.Cwd, ""), deref(u.Title, ""),
 			deref(u.Subject, ""), state, deref(u.BlockedOn, ""),
 			deref(u.LastMessage, ""), deref(u.Model, ""), boolToInt(u.BumpTurn),
-			now, now, now)
+			now, now, now, deref(u.Ticket, ""), deref(u.Branch, ""))
 		if err != nil {
 			return "", fmt.Errorf("brd: insert item: %w", err)
 		}
@@ -129,6 +134,8 @@ func (d *DB) Apply(u Upsert) (string, error) {
 		add("blocked_on", u.BlockedOn)
 		add("last_message", u.LastMessage)
 		add("model", u.Model)
+		add("ticket", u.Ticket)
+		add("branch", u.Branch)
 		if u.State != nil {
 			sets = append(sets, "state = ?")
 			args = append(args, *u.State)
@@ -244,7 +251,7 @@ func (d *DB) Items(maxAge time.Duration) ([]Item, error) {
 	cutoff := time.Now().Add(-maxAge).Unix()
 	rows, err := d.sql.Query(`
 		SELECT id, repo, cwd, title, subject, state, blocked_on, last_message,
-		       model, turns, created_at, updated_at, state_since
+		       model, turns, created_at, updated_at, state_since, ticket, branch
 		FROM items WHERE updated_at >= ? ORDER BY updated_at DESC`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("brd: query items: %w", err)
@@ -258,7 +265,7 @@ func (d *DB) Items(maxAge time.Duration) ([]Item, error) {
 		var created, updated, since int64
 		if err := rows.Scan(&it.ID, &it.Repo, &it.Cwd, &it.Title, &it.Subject,
 			&it.State, &it.BlockedOn, &it.LastMessage, &it.Model, &it.Turns,
-			&created, &updated, &since); err != nil {
+			&created, &updated, &since, &it.Ticket, &it.Branch); err != nil {
 			return nil, fmt.Errorf("brd: scan item: %w", err)
 		}
 		it.CreatedAt = time.Unix(created, 0)
@@ -345,4 +352,84 @@ func (d *DB) HasTitle(id string) bool {
 	var title string
 	err := d.sql.QueryRow(`SELECT title FROM items WHERE id = ?`, id).Scan(&title)
 	return err == nil && title != ""
+}
+
+// Pull is a pull request the board knows about, written by the TUI's poller.
+type Pull struct {
+	Repo      string // owner/name on GitHub, not a local path
+	Number    int
+	Ticket    string
+	Branch    string
+	Title     string
+	State     string // OPEN | MERGED | CLOSED
+	Review    string // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED
+	Checks    string // passing | failing | pending | none
+	URL       string
+	UpdatedAt time.Time
+	FetchedAt time.Time
+}
+
+// Attention reports whether this PR is the user's move.
+//
+// Merged and closed PRs are history. Among open ones, a failing check or a
+// requested change is something only the author can clear — an approval that
+// has not been merged is too, but it is good news, so it is not lumped in
+// with the two that are not.
+func (p Pull) Attention() bool {
+	if p.State != "OPEN" {
+		return false
+	}
+	return p.Checks == "failing" || p.Review == "CHANGES_REQUESTED"
+}
+
+// PutPull records or refreshes one pull request.
+func (d *DB) PutPull(p Pull) error {
+	_, err := d.sql.Exec(`
+		INSERT INTO pulls (repo, number, ticket, branch, title, state, review,
+		                   checks, url, updated_at, fetched_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(repo, number) DO UPDATE SET
+		  ticket = excluded.ticket, branch = excluded.branch,
+		  title = excluded.title, state = excluded.state,
+		  review = excluded.review, checks = excluded.checks,
+		  url = excluded.url, updated_at = excluded.updated_at,
+		  fetched_at = excluded.fetched_at`,
+		p.Repo, p.Number, p.Ticket, p.Branch, p.Title, p.State, p.Review,
+		p.Checks, p.URL, p.UpdatedAt.Unix(), time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("brd: put pull: %w", err)
+	}
+	return nil
+}
+
+// Pulls returns every known pull request, newest first.
+//
+// The board joins these to items in memory rather than in SQL: an item matches
+// by ticket when it has one and by branch otherwise, and expressing that
+// either-or in a query costs more than it saves at this size.
+func (d *DB) Pulls() ([]Pull, error) {
+	rows, err := d.sql.Query(`
+		SELECT repo, number, ticket, branch, title, state, review, checks, url,
+		       updated_at, fetched_at
+		FROM pulls ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("brd: query pulls: %w", err)
+	}
+	defer rows.Close()
+	var out []Pull
+	for rows.Next() {
+		var p Pull
+		var updated, fetched int64
+		if err := rows.Scan(&p.Repo, &p.Number, &p.Ticket, &p.Branch, &p.Title,
+			&p.State, &p.Review, &p.Checks, &p.URL, &updated, &fetched); err != nil {
+			return nil, fmt.Errorf("brd: scan pull: %w", err)
+		}
+		p.UpdatedAt = time.Unix(updated, 0)
+		p.FetchedAt = time.Unix(fetched, 0)
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("brd: iterate pulls: %w", err)
+	}
+	return out, nil
 }

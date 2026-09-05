@@ -97,6 +97,10 @@ func runList() error {
 		fmt.Println("board empty — no session activity in the last 24h")
 		return nil
 	}
+	prs, err := db.Pulls()
+	if err != nil {
+		return err
+	}
 	for _, col := range tui.Columns {
 		var in []store.Item
 		for _, it := range items {
@@ -109,16 +113,17 @@ func runList() error {
 		}
 		fmt.Printf("\n%s (%d)\n", col.Title, len(in))
 		for _, it := range in {
-			// The blocked reason is the whole reason to read this column, so
-			// it goes on the row itself rather than only in the TUI detail.
-			age := tui.ShortAge(it.Age())
-			if it.BlockedOn != "" {
-				age += " " + it.BlockedOn
-			}
-			fmt.Printf("  %-26s %-22s %s\n",
-				age, tui.RepoName(it.Repo), tui.Label(it))
+			// Stamp then age: the clock time is the fixed point you correlate
+			// against, the age is the same fact in the form that scans faster.
+			when := fmt.Sprintf("%s %s", tui.Stamp(it.StateSince), tui.ShortAge(it.Age()))
+			why := tui.BlockedLabel(it.BlockedOn)
+			fmt.Printf("  %-13s %-18s %-22s %s\n",
+				when, why, tui.RepoName(it.Repo), tui.Label(it))
 			for _, c := range it.Children {
-				fmt.Printf("            └ %s %s\n", c.Kind, c.Label)
+				fmt.Printf("%18s└ %s %s\n", "", c.Kind, c.Label)
+			}
+			if badge, _ := tui.PullBadge(tui.PullsFor(it, prs)); badge != "" {
+				fmt.Printf("%18s└ %s\n", "", badge)
 			}
 		}
 	}

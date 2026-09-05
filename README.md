@@ -5,13 +5,15 @@ hook events.
 
 ```
 brd  2 waiting on you · 3 live
-Blocked 2                  │Working 1                  │Background 2               │Done 1
-▌ apply the review comments│  research kanban boards   │  benchmark hybrid search  │  clean up stale secrets
-  ghx 12m permission_prompt│  brd 40s                  │  kmd 8m shell subagent×2  │  dots 2h0m
-  plan the addon rollout   │                           │  watch the deploy         │
-  tweb 3m agent_needs_input│                           │  okx 22m cron             │
+Blocked 2                           │Working 1                           │Background 2                        │Done 1
+▌ apply the review comments         │  research kanban boards            │  benchmark hybrid search           │  clean up stale secrets
+  ghx 21:24 · 12m needs permission  │  brd 21:35 · 40s                   │  kmd 21:28 · 8m shell subagent     │  dots 19:36 · 2h0m
+  #90 checks failing                │                                    │  CPLAT-1204 watch the deploy       │  #71 merged
+  CPLAT-1204 plan the addon rollout │                                    │  okx 21:14 · 22m cron              │
+  tweb 21:33 · 3m awaiting input    │                                    │  #88 changes requested             │
+  #88 changes requested             │                                    │                                    │
 
-hjkl move · ↵ detail · r refresh · q quit
+hjkl move · ↵ detail · J jump · R resume · t group · r refresh · q quit
 ```
 
 ## Why
@@ -20,6 +22,11 @@ With a dozen sessions open, the question that costs the most time is *which
 one is waiting on me, and what for?* A tmux dashboard can answer the first
 half. brd answers both, and adds the half neither can see: whether a session
 that stopped talking is **finished** or **parked on its own background work**.
+
+Then it lets you act on the answer — `J` jumps to the session's tmux pane, `R`
+resumes an ended one — and follows the work past the session: several sessions
+on one JIRA ticket group together (`t`), and the pull requests they opened are
+tracked alongside them.
 
 ## The agent is never asked to report
 
@@ -38,12 +45,39 @@ Seven events carry everything:
 
 | Event | What it establishes |
 |---|---|
-| `SessionStart` | repo, model, title |
-| `UserPromptSubmit` | **Working**, and the prompt names the item |
+| `SessionStart` | repo, model |
+| `UserPromptSubmit` | **Working** |
 | `Notification` | **Blocked**, and *what* it is blocked on |
 | `Stop` | **Done**, or **Background** — see below |
 | `SubagentStart` / `SubagentStop` | children appear and resolve |
 | `SessionEnd` | ended |
+
+Every event also carries `cwd` and `transcript_path`, which is where the name,
+branch and ticket come from — see below.
+
+### The session already knows what it is about
+
+The first attempt named each item after its first prompt. On a live board of 14
+items that produced 6 unreadable names: bare UUIDs (a cross-session wake-up
+naming its peer), a line of pasted Slack permalinks, a bare `/sb:pr-followup`,
+and two blanks.
+
+Claude Code writes a better name itself. Its transcript carries an `ai-title`
+record — what the session is *about*, refreshed as the work moves — and every
+one of 20 sampled sessions had one. It also carries `pr-link`, so a PR the
+session opened needs no discovery (12 of those 20 had one), and `gitBranch`,
+which is where the JIRA ticket lives.
+
+Reading it is cheap enough for a hook: the records sit near the end of the file
+— never more than 27 lines from it across 12 sampled transcripts — so brd reads
+the last 256 KiB, a few milliseconds even on a 3 MB transcript.
+
+### Grouping by ticket
+
+The local convention puts the ticket in the branch name (`CPLAT-11964/desc`,
+`CPLAT-11993-gestalt-image-tag`), and a PR guard enforces it, so the branch is
+the one place it is guaranteed — and it is there before any PR exists, which is
+what makes it a better grouping key than the PR.
 
 ### The distinction that matters
 
@@ -111,14 +145,35 @@ brd ls       # the board as text, for a scratch pane or a status line
 | Key | |
 |---|---|
 | `hjkl` / arrows | move between columns and cards |
-| `↵` | detail: children, cwd, model, turns, last message |
+| `↵` | detail: PRs, children, branch, ticket, last message |
 | `b` | jump to the first blocked item |
+| `J` | switch to the session's tmux pane |
+| `R` | resume the session in this terminal |
+| `t` | group by JIRA ticket |
 | `r` | refresh now |
 | `q` | quit (closes the detail pane first) |
+
+`J` needs no bookkeeping of brd's own: a pane already advertises which Claude
+session it holds, in the `@cc_pane_session` option. When there is no live pane
+— the session ended — the board says so and points at `R`, which runs
+`claude --resume <id>` in the session's own directory and hands the terminal
+back when it exits.
 
 Keys appear in the hint bar only when they would do something. A bar wider
 than the terminal truncates from the right, so a bar that lists everything
 hides the keys a lost user needs most.
+
+## Pull requests are the one thing hooks cannot tell you
+
+The gh CLI takes about a second per call — far too slow to run at every turn
+boundary in every session — and a PR changes when no session is running at all,
+because review happens on someone else's clock. So the TUI polls once a minute
+while it is on screen, and a board nobody is looking at costs nothing.
+
+A card shows the PR that most needs you, not the newest: a failing check on an
+older PR outranks a green one opened since. Merged PRs surface only when
+nothing is open, because "it landed" is the question you have right after a
+session goes quiet.
 
 ## Storage
 

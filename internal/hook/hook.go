@@ -36,9 +36,10 @@ import (
 // one JSON object on stdin per invocation; fields absent for a given event
 // simply stay zero.
 type Event struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
-	Cwd           string `json:"cwd"`
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
 
 	// UserPromptSubmit
 	Prompt string `json:"prompt"`
@@ -195,21 +196,58 @@ func handleNotification(db *store.DB, ev Event) error {
 	return db.LogEvent(ev.SessionID, "blocked", firstLine(ev.Message, 200))
 }
 
-// withIdentity fills in repo and cwd, which every hook event carries as a
-// common field.
+// withIdentity fills in everything that identifies an item, from fields every
+// hook event carries: cwd, and the transcript the session is writing.
 //
-// Only SessionStart and UserPromptSubmit used to set these, so a session first
-// seen at a Stop — the common case for a session already running when brd was
-// installed, or one resumed with --resume — showed a bare id and no repo on
-// the board. Measured on the live board minutes after install: 2 of 3 items
-// had empty repo and cwd.
+// Two lessons are baked in here, both measured on the live board rather than
+// guessed. Repo and cwd used to be set only by SessionStart and
+// UserPromptSubmit, so a session first seen at a Stop — already running when
+// brd was installed, or resumed with --resume — showed a bare uuid; 2 of the
+// first 3 items had no repo. And the title used to come from the first prompt,
+// which produced 6 unreadable names out of 14: bare uuids from cross-session
+// wake-ups, a pasted Slack URL, "/sb:pr-followup", and blanks. Claude Code
+// already writes a better one.
 func withIdentity(u *store.Upsert, ev Event) {
-	if ev.Cwd == "" {
-		return
+	if ev.Cwd != "" {
+		repo := repoRoot(ev.Cwd)
+		u.Repo = &repo
+		u.Cwd = &ev.Cwd
 	}
-	repo := repoRoot(ev.Cwd)
-	u.Repo = &repo
-	u.Cwd = &ev.Cwd
+	facts := readTranscript(ev.TranscriptPath)
+	if facts.Title != "" {
+		u.Title = &facts.Title
+	}
+	// The branch is read from the transcript rather than by running git: the
+	// session records the branch it was actually on for that turn, which stays
+	// right even when the checkout has moved on since.
+	branch := facts.Branch
+	if branch == "" && ev.Cwd != "" {
+		branch = gitBranch(ev.Cwd)
+	}
+	if branch != "" {
+		u.Branch = &branch
+		if t := ticketFrom(branch); t != "" {
+			u.Ticket = &t
+		}
+	}
+}
+
+// gitBranch is the fallback for a session whose transcript has not recorded a
+// usable branch — a fresh session, or one in a detached HEAD where the
+// transcript records "HEAD". Measured at 12ms, which is cheap enough to run on
+// a hook; the gh CLI, at about a second, is not.
+func gitBranch(cwd string) string {
+	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Stderr = nil
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "HEAD" {
+		return "" // detached; no name to group by
+	}
+	return branch
 }
 
 // Markers that identify a harness-generated prompt.
@@ -362,25 +400,6 @@ func handleSubagentStop(db *store.DB, ev Event) error {
 		detail += ": " + msg
 	}
 	return db.LogEvent(ev.SessionID, "subagent_stop", detail)
-}
-
-// backgroundLabel picks the most identifying field for a task type. The
-// harness puts the useful name in a different field per type, so a generic
-// label would read "shell" for every shell job on the board.
-func backgroundLabel(bt BackgroundTask) string {
-	switch {
-	case bt.AgentType != "":
-		return bt.AgentType
-	case bt.Name != "":
-		return bt.Name
-	case bt.Tool != "":
-		return bt.Tool
-	case bt.Server != "":
-		return bt.Server
-	case bt.Command != "":
-		return firstLine(bt.Command, 80)
-	}
-	return bt.Type
 }
 
 // Read parses one hook payload from r.
