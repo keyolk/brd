@@ -93,6 +93,7 @@ func runList() error {
 	if err != nil {
 		return err
 	}
+	items = tui.ApplyLiveness(items)
 	if len(items) == 0 {
 		fmt.Println("board empty — no session activity in the last 24h")
 		return nil
@@ -104,6 +105,9 @@ func runList() error {
 	for _, col := range tui.Columns {
 		var in []store.Item
 		for _, it := range items {
+			if it.State == store.StateEnded {
+				continue // off the board entirely; see Item.Column
+			}
 			if it.Column() == col.Title {
 				in = append(in, it)
 			}
@@ -117,8 +121,14 @@ func runList() error {
 			// against, the age is the same fact in the form that scans faster.
 			when := fmt.Sprintf("%s %s", tui.Stamp(it.StateSince), tui.ShortAge(it.Age()))
 			why := tui.BlockedLabel(it.BlockedOn)
-			fmt.Printf("  %-13s %-18s %-22s %s\n",
-				when, why, tui.RepoName(it.Repo), tui.Label(it))
+			// The same live marker the TUI draws: without it a text board of
+			// mostly-running sessions reads as a list of finished ones.
+			pulse := "·"
+			if it.Live {
+				pulse = "●"
+			}
+			fmt.Printf("%s %-13s %-18s %-22s %s\n",
+				pulse, when, why, tui.RepoName(it.Repo), tui.Label(it))
 			for _, c := range it.Children {
 				fmt.Printf("%18s└ %s %s\n", "", c.Kind, c.Label)
 			}

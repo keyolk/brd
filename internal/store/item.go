@@ -29,10 +29,14 @@ type Item struct {
 	Turns       int
 	Ticket      string
 	Branch      string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	StateSince  time.Time
-	Children    []Child
+	// Live is set by the TUI from tmux, not by a hook and not from the
+	// database: no hook can report that a session still exists, only what it
+	// last did. See internal/tui/liveness.go.
+	Live       bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	StateSince time.Time
+	Children   []Child
 }
 
 // Child is a live piece of work owned by an item.
@@ -47,6 +51,12 @@ type Child struct {
 
 // Column is the board column an item belongs in. Derived, never stored: the
 // column is a function of state, so it can never disagree with it.
+//
+// Idle and Ended are separate columns even though both mean "no turn running",
+// because the difference is whether you can still type into it. Collapsing
+// them was the original mistake: `Stop` fires when a *turn* ends, so a session
+// sitting at a prompt landed in "Done" and read as finished work. Measured
+// against tmux, 10 of 26 live sessions were being shown that way.
 func (i Item) Column() string {
 	switch i.State {
 	case StateWaiting:
@@ -55,10 +65,12 @@ func (i Item) Column() string {
 		return "Working"
 	case StateBackground:
 		return "Background"
-	case StateDone, StateEnded:
-		return "Done"
+	case StateEnded:
+		// Not a column: an ended session is off the board entirely. See
+		// Model.inColumn.
+		return ""
 	}
-	return "Done"
+	return "Idle"
 }
 
 // Age is how long the item has held its current state.

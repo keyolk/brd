@@ -1,4 +1,4 @@
-package hook
+package transcript
 
 import (
 	"os"
@@ -27,7 +27,7 @@ func TestReadTranscriptTakesTheLatestTitle(t *testing.T) {
 		`{"type":"user","gitBranch":"CPLAT-11964/infra-provisioner","cwd":"/src"}`,
 		`{"type":"ai-title","aiTitle":"what it turned out to be","sessionId":"s1"}`,
 	)
-	got := readTranscript(path)
+	got := Read(path)
 	if got.Title != "what it turned out to be" {
 		t.Errorf("Title = %q, want the last one written", got.Title)
 	}
@@ -41,7 +41,7 @@ func TestReadTranscriptFindsThePR(t *testing.T) {
 	path := writeTranscript(t,
 		`{"type":"pr-link","sessionId":"s1","prNumber":932,"prUrl":"https://github.com/o/r/pull/932","prRepository":"o/r"}`,
 	)
-	got := readTranscript(path)
+	got := Read(path)
 	if got.PRNumber != 932 || got.PRRepo != "o/r" {
 		t.Errorf("pr = %d %q, want 932 o/r", got.PRNumber, got.PRRepo)
 	}
@@ -53,7 +53,7 @@ func TestReadTranscriptRejectsDetachedHead(t *testing.T) {
 	path := writeTranscript(t,
 		`{"type":"user","gitBranch":"HEAD","cwd":"/src"}`,
 	)
-	if got := readTranscript(path).Branch; got != "" {
+	if got := Read(path).Branch; got != "" {
 		t.Errorf("Branch = %q, want empty for a detached HEAD", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestReadTranscriptSurvivesBadInput(t *testing.T) {
 	}
 	for name, path := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := readTranscript(path) // must not panic
+			got := Read(path) // must not panic
 			if got.Title != "" {
 				t.Errorf("got a title from %s: %q", name, got.Title)
 			}
@@ -89,7 +89,7 @@ func TestReadTranscriptReadsOnlyTheTail(t *testing.T) {
 	lines = append(lines, `{"type":"ai-title","aiTitle":"current"}`)
 	path := writeTranscript(t, lines...)
 
-	got := readTranscript(path)
+	got := Read(path)
 	if got.Title != "current" {
 		t.Errorf("Title = %q, want the recent one", got.Title)
 	}
@@ -104,7 +104,7 @@ func TestReadTranscriptDiscardsThePartialFirstLine(t *testing.T) {
 		lines = append(lines, filler)
 	}
 	lines = append(lines, `{"type":"ai-title","aiTitle":"intact"}`)
-	got := readTranscript(writeTranscript(t, lines...))
+	got := Read(writeTranscript(t, lines...))
 	if got.Title != "intact" {
 		t.Errorf("Title = %q", got.Title)
 	}
@@ -122,35 +122,8 @@ func TestTicketFromBranch(t *testing.T) {
 		"feature/no-ticket-here":                "",
 	}
 	for branch, want := range cases {
-		if got := ticketFrom(branch); got != want {
-			t.Errorf("ticketFrom(%q) = %q, want %q", branch, got, want)
+		if got := TicketFrom(branch); got != want {
+			t.Errorf("TicketFrom(%q) = %q, want %q", branch, got, want)
 		}
-	}
-}
-
-// The command labels on the live board were three rows of the same truncated
-// scratch path — three different jobs, none distinguishable.
-func TestCommandLabelKeepsTheProgramNotThePath(t *testing.T) {
-	cases := map[string]string{
-		"go test ./... -race":                                                                  "go test",
-		"T=/private/tmp/claude-502/-Users-x/y/z bash run":                                      "bash run",
-		"SP=/tmp/a prev=\"\" /usr/bin/env python3 thing.py":                                    "env python3",
-		"/private/tmp/claude-502/-Users-gavin-jeong-src-sendbird-mitm-proxy/260a6668/probe.sh": "probe.sh",
-		"prev=\"\"": "prev=\"\"",
-	}
-	for command, want := range cases {
-		if got := commandLabel(command); got != want {
-			t.Errorf("commandLabel(%q) = %q, want %q", command, got, want)
-		}
-	}
-}
-
-// A description is a human summary; a command line is not. When both exist
-// the description wins.
-func TestBackgroundLabelPrefersADescription(t *testing.T) {
-	bt := BackgroundTask{Type: "shell", Description: "race test",
-		Command: "/private/tmp/claude-502/-Users-x/probe.sh"}
-	if got := backgroundLabel(bt); got != "race test" {
-		t.Errorf("backgroundLabel = %q, want the description", got)
 	}
 }

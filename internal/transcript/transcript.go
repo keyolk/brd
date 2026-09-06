@@ -1,4 +1,4 @@
-package hook
+package transcript
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// transcriptFacts is what the session's own transcript already knows about
+// Facts is what the session's own transcript already knows about
 // itself, read from the tail of the JSONL file the hook payload points at.
 //
 // This exists because deriving a title from the prompt was wrong. Claude Code
@@ -19,7 +19,7 @@ import (
 //
 // It also carries `pr-link`, so the PR a session opened needs no discovery at
 // all — 12 of those 20 sessions had one recorded.
-type transcriptFacts struct {
+type Facts struct {
 	Title     string
 	Branch    string
 	PRNumber  int
@@ -37,11 +37,11 @@ type transcriptFacts struct {
 // what makes this safe to do on every hook invocation.
 const tailBytes = 256 << 10
 
-// readTranscript pulls the facts out of the tail of path. Every failure is a
+// Read pulls the facts out of the tail of path. Every failure is a
 // silent empty result: a transcript that is missing, truncated, or half-written
 // is not a reason to fail a hook.
-func readTranscript(path string) transcriptFacts {
-	var f transcriptFacts
+func Read(path string) Facts {
+	var f Facts
 	if path == "" {
 		return f
 	}
@@ -127,13 +127,13 @@ func readTranscript(path string) transcriptFacts {
 // better grouping key than the PR.
 var ticketPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9]+-\d+)\b`)
 
-// ticketFrom pulls a JIRA key out of a branch name.
+// TicketFrom pulls a JIRA key out of a branch name.
 //
 // Both separators in use are handled by the same pattern: `CPLAT-11964/desc`
 // and `CPLAT-11993-gestalt-image-tag`. A branch with no key — `main`,
 // `follow-the-work` — yields nothing, and that session simply stays grouped by
 // repository.
-func ticketFrom(branch string) string {
+func TicketFrom(branch string) string {
 	m := ticketPattern.FindStringSubmatch(branch)
 	if m == nil {
 		return ""

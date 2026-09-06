@@ -31,7 +31,7 @@ var Columns = []Column{
 	{Title: "Blocked", Hint: "nothing waiting on you"},
 	{Title: "Working", Hint: "no turn in flight"},
 	{Title: "Background", Hint: "no parked work"},
-	{Title: "Done", Hint: "nothing idle"},
+	{Title: "Idle", Hint: "no session at a prompt"},
 }
 
 // refreshInterval is how often the board re-reads the database.
@@ -98,6 +98,10 @@ func (m Model) load() tea.Cmd {
 		if err != nil {
 			return loadedMsg{err: err}
 		}
+		// tmux is asked on every refresh, not cached: it is the only thing
+		// that knows whether a session still exists, and at 7ms for every
+		// pane it is cheaper than the database read it accompanies.
+		items = applyLiveness(items, liveSessions())
 		prs, err := m.db.Pulls()
 		return loadedMsg{items: items, pulls: prs, err: err}
 	}
@@ -125,6 +129,13 @@ func (m Model) inColumn(i int) []store.Item {
 	want := Columns[i].Title
 	var out []store.Item
 	for _, it := range m.items {
+		// An ended session has no column. The board is what is in flight;
+		// reading finished sessions is a session browser's job, and keeping
+		// them here is what made "Done" read as a graveyard of 11 items that
+		// were mostly still alive.
+		if it.State == store.StateEnded {
+			continue
+		}
 		if it.Column() == want {
 			out = append(out, it)
 		}

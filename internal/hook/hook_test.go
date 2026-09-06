@@ -157,7 +157,7 @@ func TestSubagentStopRemovesChild(t *testing.T) {
 // blocks parks finished sessions in the column that exists to be short.
 func TestOnlyBlockingNotificationsBlock(t *testing.T) {
 	blocking := []string{
-		"permission_prompt", "idle_prompt", "agent_needs_input",
+		"permission_prompt", "agent_needs_input",
 		"elicitation_dialog", "elicitation_url_dialog",
 	}
 	for _, nt := range blocking {
@@ -554,5 +554,47 @@ func TestRealPromptsAreNotMistakenForSynthetic(t *testing.T) {
 				t.Errorf("title = %q, want %q", got.Title, prompt)
 			}
 		})
+	}
+}
+
+// idle_prompt was originally classified as blocking, and it was the single
+// worst call in the whole design: it fires when a session has been sitting at
+// a prompt, which is the same state Stop already reports. Treating it as a
+// block put every finished session in the column that exists to be short —
+// measured on the live board, 7 of 7 "Blocked" items were this.
+func TestIdlePromptIsIdleNotBlocked(t *testing.T) {
+	db := open(t)
+	apply(t, db,
+		Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp", Prompt: "go"},
+		Event{HookEventName: "Notification", NotificationType: "idle_prompt"},
+	)
+	got := only(t, db)
+	if got.State != store.StateDone {
+		t.Errorf("state = %q, want %q", got.State, store.StateDone)
+	}
+	if got.BlockedOn != "" {
+		t.Errorf("blocked_on = %q, want empty", got.BlockedOn)
+	}
+	if got.Column() != "Idle" {
+		t.Errorf("column = %q, want Idle", got.Column())
+	}
+}
+
+// Reaching an idle prompt means the turn finished, so whatever the session was
+// blocked on is resolved. Without this the board keeps showing a permission
+// prompt the user already answered.
+func TestIdlePromptClearsAnEarlierBlock(t *testing.T) {
+	db := open(t)
+	apply(t, db,
+		Event{HookEventName: "UserPromptSubmit", Cwd: "/tmp", Prompt: "go"},
+		Event{HookEventName: "Notification", NotificationType: "permission_prompt"},
+		Event{HookEventName: "Notification", NotificationType: "idle_prompt"},
+	)
+	got := only(t, db)
+	if got.BlockedOn != "" {
+		t.Errorf("blocked_on = %q, want the stale block cleared", got.BlockedOn)
+	}
+	if got.State != store.StateDone {
+		t.Errorf("state = %q, want %q", got.State, store.StateDone)
 	}
 }

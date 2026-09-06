@@ -115,8 +115,10 @@ func TestEmptyBoardExplainsItself(t *testing.T) {
 			t.Errorf("empty column %q lost its hint %q:\n%s", col.Title, col.Hint, out)
 		}
 	}
-	if !strings.Contains(out, "idle") {
-		t.Errorf("empty board header should read idle:\n%s", out)
+	// Not "idle" — that is now a column name, and a header echoing it would
+	// read as a count rather than as the absence of one.
+	if !strings.Contains(out, "nothing running") {
+		t.Errorf("empty board header should say nothing is running:\n%s", out)
 	}
 }
 
@@ -244,13 +246,13 @@ func TestShortAge(t *testing.T) {
 	}
 }
 
-// Every state must land in a column, including one this build does not know:
-// an unmapped state that rendered nowhere would drop an item off the board
-// silently, which is worse than showing it in the wrong place.
-func TestEveryStateHasAColumn(t *testing.T) {
+// Every live state must land in a column, including one this build does not
+// know: an unmapped state that rendered nowhere would drop a live item off the
+// board silently, which is worse than showing it in the wrong place.
+func TestEveryLiveStateHasAColumn(t *testing.T) {
 	states := []string{
 		store.StateWaiting, store.StateWorking, store.StateBackground,
-		store.StateDone, store.StateEnded, "some-future-state",
+		store.StateDone, "some-future-state",
 	}
 	titles := map[string]bool{}
 	for _, c := range Columns {
@@ -261,6 +263,31 @@ func TestEveryStateHasAColumn(t *testing.T) {
 		if !titles[col] {
 			t.Errorf("state %q maps to unknown column %q", s, col)
 		}
+	}
+	// Ended is the one exception, and it is deliberate: the board shows what
+	// is in flight, so a finished session leaves it rather than piling up in
+	// a column that then reads as a graveyard.
+	if col := (store.Item{State: store.StateEnded}).Column(); col != "" {
+		t.Errorf("ended maps to column %q, want no column", col)
+	}
+}
+
+// An ended session must not appear anywhere on the board. Keeping them is what
+// made the Done column report 11 items, most of which were sessions still
+// sitting at a prompt.
+func TestEndedItemsLeaveTheBoard(t *testing.T) {
+	m := Model{items: []store.Item{
+		{ID: "live", State: store.StateDone},
+		{ID: "gone", State: store.StateEnded},
+	}}
+	var seen []string
+	for i := range Columns {
+		for _, it := range m.inColumn(i) {
+			seen = append(seen, it.ID)
+		}
+	}
+	if strings.Join(seen, ",") != "live" {
+		t.Errorf("board showed %v, want only the live item", seen)
 	}
 }
 

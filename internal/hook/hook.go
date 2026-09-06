@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/brd/internal/transcript"
 )
 
 // Event is the union of the hook payload fields brd reads. Claude Code sends
@@ -95,13 +96,22 @@ type SessionCron struct {
 // sessions in the Blocked column, which is exactly the noise the column
 // exists to cut through.
 var blockingNotifications = map[string]bool{
-	"permission_prompt":  true,
-	"idle_prompt":        true,
-	"agent_needs_input":  true,
-	"elicitation_dialog": true,
-	// An elicitation that needs a browser is still a human waiting.
-	"elicitation_url_dialog": true,
+	// Each of these is a question the session cannot answer itself.
+	"permission_prompt":      true,
+	"agent_needs_input":      true,
+	"elicitation_dialog":     true,
+	"elicitation_url_dialog": true, // needs a browser, but still a human
 }
+
+// idlePromptNotification is not in that set, and getting it wrong is what
+// inflated the Blocked column to 7 items that were nothing of the kind.
+//
+// It fires when a session has been sitting at a prompt for a while. That is
+// the same state `Stop` already reports — the turn ended and the session is
+// waiting for its next instruction — so treating it as a block puts every
+// finished session in the column that exists to be short. It still means the
+// session is alive and idle, so it clears any stale block instead.
+const idlePromptNotification = "idle_prompt"
 
 // Handle applies one event to the board.
 func Handle(db *store.DB, ev Event) error {
@@ -183,6 +193,16 @@ func handleUserPrompt(db *store.DB, ev Event) error {
 }
 
 func handleNotification(db *store.DB, ev Event) error {
+	if ev.NotificationType == idlePromptNotification {
+		// Idle, not blocked. A session that reaches this has finished its
+		// turn, so anything it was previously blocked on is resolved.
+		state := store.StateDone
+		cleared := ""
+		u := store.Upsert{ID: ev.SessionID, State: &state, BlockedOn: &cleared}
+		withIdentity(&u, ev)
+		_, err := db.Apply(u)
+		return err
+	}
 	if !blockingNotifications[ev.NotificationType] {
 		return nil
 	}
@@ -213,7 +233,7 @@ func withIdentity(u *store.Upsert, ev Event) {
 		u.Repo = &repo
 		u.Cwd = &ev.Cwd
 	}
-	facts := readTranscript(ev.TranscriptPath)
+	facts := transcript.Read(ev.TranscriptPath)
 	if facts.Title != "" {
 		u.Title = &facts.Title
 	}
@@ -226,7 +246,7 @@ func withIdentity(u *store.Upsert, ev Event) {
 	}
 	if branch != "" {
 		u.Branch = &branch
-		if t := ticketFrom(branch); t != "" {
+		if t := transcript.TicketFrom(branch); t != "" {
 			u.Ticket = &t
 		}
 	}

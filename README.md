@@ -4,13 +4,13 @@ A kanban board for the Claude Code sessions on this machine, fed entirely by
 hook events.
 
 ```
-brd  2 waiting on you · 3 live
-Blocked 2                           │Working 1                           │Background 2                        │Done 1
-▌ apply the review comments         │  research kanban boards            │  benchmark hybrid search           │  clean up stale secrets
-  ghx 21:24 · 12m needs permission  │  brd 21:35 · 40s                   │  kmd 21:28 · 8m shell subagent     │  dots 19:36 · 2h0m
-  #90 checks failing                │                                    │  CPLAT-1204 watch the deploy       │  #71 merged
-  CPLAT-1204 plan the addon rollout │                                    │  okx 21:14 · 22m cron              │
-  tweb 21:33 · 3m awaiting input    │                                    │  #88 changes requested             │
+brd  2 waiting on you · 1 working · 6 live
+Blocked 2                           │Working 1                           │Background 2                        │Idle 2
+▌●apply the review comments         │ ●research kanban boards            │ ●benchmark hybrid search           │ ●clean up stale secrets
+  ghx 23:13 · 12m needs permission  │  brd 23:24 · 40s                   │  kmd 23:17 · 8m shell subagent     │  dots 21:25 · 2h0m
+  #90 checks failing                │                                    │ ●CPLAT-1204 watch the deploy       │  #71 merged
+ ●CPLAT-1204 plan the addon rollout │                                    │  okx 23:03 · 22m cron              │ ·sgl vs vllm comparison
+  tweb 23:22 · 3m agent needs input │                                    │  #88 changes requested             │  okx Sep 5 21:25 · 1d
   #88 changes requested             │                                    │                                    │
 
 hjkl move · ↵ detail · J jump · R resume · t group · r refresh · q quit
@@ -48,7 +48,7 @@ Seven events carry everything:
 | `SessionStart` | repo, model |
 | `UserPromptSubmit` | **Working** |
 | `Notification` | **Blocked**, and *what* it is blocked on |
-| `Stop` | **Done**, or **Background** — see below |
+| `Stop` | **Idle**, or **Background** — see below |
 | `SubagentStart` / `SubagentStop` | children appear and resolve |
 | `SessionEnd` | ended |
 
@@ -81,7 +81,7 @@ what makes it a better grouping key than the PR.
 
 ### The distinction that matters
 
-`Stop` fires identically whether a session finished or is merely parked
+`Stop` fires identically whether a session is idle or merely parked
 waiting for its own shell job to wake it up. The only thing separating them is
 whether `background_tasks[]` came back empty:
 
@@ -103,10 +103,44 @@ otherwise be dropped and re-added, resetting its age.
 
 ### Not every notification is a block
 
-Only the types a human can clear count: `permission_prompt`, `idle_prompt`,
-`agent_needs_input`, `elicitation_dialog`, `elicitation_url_dialog`. Treating
-`agent_completed` or the quota-resume family as blocks would park finished
-sessions in the one column that has to stay short to mean anything.
+Only the types a human can clear count: `permission_prompt`,
+`agent_needs_input`, `elicitation_dialog`, `elicitation_url_dialog`.
+
+`idle_prompt` is deliberately not among them, and classifying it as one was the
+worst call in the original design. It fires when a session has been sitting at
+a prompt — the same state `Stop` already reports — so treating it as a block
+filled the column that exists to be short: on the live board, **7 of 7
+"Blocked" items were this**, and none of them were blocked on anything.
+
+## Hooks cannot tell you whether a session still exists
+
+A hook reports a transition and then stops talking. `Stop` says the *turn*
+ended, not the session, and a session killed with SIGKILL or a closed terminal
+never fires `SessionEnd` at all — so the last hook a session fired stayed on
+the board forever whether or not the session outlived it.
+
+Measured against tmux, that was most of the board: of **26 live sessions, brd
+disagreed about 16** — ten it showed as finished that were sitting at a prompt,
+five it had never heard of, and one it showed as waiting that had ended.
+
+tmux has the answer, because the `cc_state` hook publishes it on the pane
+itself and refreshes it every turn. Reading every pane costs 7ms, so brd asks
+on every refresh:
+
+| | is the authority on |
+|---|---|
+| hooks | *why* an item is where it is — which permission, what parked it |
+| tmux | *whether the session still exists*, and whether it is mid-turn |
+
+Where they disagree about existence, tmux wins: a hook can only report the
+past. A live session brd has never recorded is added from tmux and named from
+its own transcript, which is the normal case right after installing the hooks —
+8 of those 26 had fired none. A session tmux does not hold leaves the board
+entirely.
+
+A `●` marks a live session and a dim `·` a dead one. Without it a board of
+mostly-running sessions read as a list of finished work, which is what prompted
+all of the above.
 
 ## Install
 
