@@ -120,7 +120,7 @@ func (m Model) renderHints() string {
 	}
 	// Grouping is only worth offering once two items actually share a ticket;
 	// below that it is a key that visibly does nothing.
-	if m.group || m.sharedTickets() {
+	if m.group || m.sharedGroups() {
 		keys = append(keys, "t "+ternary(m.group, "ungroup", "group"))
 	}
 	keys = append(keys, "r refresh", "q quit")
@@ -175,16 +175,19 @@ func (m Model) renderColumn(idx int, col Column, w, height int) string {
 	if len(in) == 0 {
 		lines = append(lines, dim.Render(truncate(col.Hint, w)))
 	}
-	lastTicket := ""
+	lastGroup := ""
 	for i, it := range in {
-		// A ticket header, printed once per run of items sharing one. Only
-		// while grouping, and only for items that have a ticket — a header
-		// above every single row would cost more space than it explains.
-		if m.group && it.Ticket != "" && it.Ticket != lastTicket {
-			lines = append(lines, headStyle.Render(truncate(it.Ticket, w)))
-		}
+		// A group header, printed once per run of items sharing a key. Items
+		// with nothing to group by get no header — one above every single row
+		// would cost more space than it explains.
 		if m.group {
-			lastTicket = it.Ticket
+			if key := it.GroupKey(); key != lastGroup {
+				lastGroup = key
+				if label := it.GroupLabel(); label != "" {
+					lines = append(lines, headStyle.Render(
+						truncate(groupHeader(it), w)))
+				}
+			}
 		}
 		lines = append(lines, m.renderCard(it, i == m.row && focused, w)...)
 		if len(lines) >= height {
@@ -278,6 +281,15 @@ func BlockedLabel(notificationType string) string {
 		return "needs a reply"
 	}
 	return notificationType
+}
+
+// groupHeader names a group. A repository group shows the directory name the
+// user calls it by; a ticket group shows the ticket, which is already the name.
+func groupHeader(it store.Item) string {
+	if it.Ticket != "" {
+		return it.Ticket
+	}
+	return RepoName(it.Repo)
 }
 
 // reviewLabel puts GitHub's review decision into words that match how the

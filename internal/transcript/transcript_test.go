@@ -127,3 +127,37 @@ func TestTicketFromBranch(t *testing.T) {
 		}
 	}
 }
+
+// Branches are typed by hand and the case slips: cplat-11794-count-... and
+// CPLAT-11794/cursor-cli-... are the same ticket in the same repo. Requiring
+// uppercase silently dropped the first, so the two never grouped.
+func TestTicketFromIsCaseInsensitiveAndNormalizes(t *testing.T) {
+	cases := map[string]string{
+		"cplat-11794-count-abandoned-handshakes": "CPLAT-11794",
+		"CPLAT-11794/cursor-cli-connector-alias": "CPLAT-11794",
+		"Cplat-11794-mixed":                      "CPLAT-11794",
+		"AIML-121-jarvis-tooling-doppler":        "AIML-121",
+		"DINF-4659":                              "DINF-4659",
+	}
+	for branch, want := range cases {
+		if got := TicketFrom(branch); got != want {
+			t.Errorf("TicketFrom(%q) = %q, want %q", branch, got, want)
+		}
+	}
+}
+
+// A project prefix with no number is not a ticket, and a detached checkout
+// records prose rather than a branch name. Neither must produce a match.
+func TestTicketFromRejectsNonTickets(t *testing.T) {
+	for _, branch := range []string{
+		"CPLAT-zerosoda-mirror",        // prefix, no number
+		"(HEAD detached at 9d834e4d2)", // not a branch name at all
+		"(HEAD detached at origin/main)",
+		"main", "master", "auto-add-workspace", "cohome",
+		"share-the-cache", "follow-the-work", "",
+	} {
+		if got := TicketFrom(branch); got != "" {
+			t.Errorf("TicketFrom(%q) = %q, want no match", branch, got)
+		}
+	}
+}

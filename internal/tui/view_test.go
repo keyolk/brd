@@ -453,42 +453,113 @@ func TestPullsAreMatchedByTicketThenBranch(t *testing.T) {
 	}
 }
 
-// Grouping brings ticketed items together without scrambling recency inside
-// a ticket or promoting untickted ones.
-func TestGroupingOrdersByTicketAndKeepsRecency(t *testing.T) {
-	mk := func(id, ticket string) store.Item {
-		return store.Item{ID: id, Ticket: ticket, State: store.StateDone}
+// Grouping keys on the ticket when there is one and the repository otherwise,
+// and a stable sort keeps recency inside each group.
+//
+// Ticket-only grouping was almost inert: on a live board of 19 items just 2
+// carried a ticket, and those two were different tickets, so the grouped view
+// was identical to the ungrouped one. The repository fallback is what actually
+// binds sessions together — measured on the same board, 3 in one column and 4
+// in another.
+func TestGroupingPrefersTicketThenRepo(t *testing.T) {
+	mk := func(id, ticket, repo string) store.Item {
+		return store.Item{ID: id, Ticket: ticket, Repo: repo, State: store.StateDone}
 	}
 	m := Model{items: []store.Item{
-		mk("a", "CPLAT-2"), mk("b", ""), mk("c", "CPLAT-1"),
-		mk("d", "CPLAT-2"), mk("e", ""),
+		mk("a", "", "/src/zeta"),
+		mk("b", "CPLAT-2", "/src/alpha"),
+		mk("c", "", "/src/alpha"),
+		mk("d", "CPLAT-1", "/src/beta"),
+		mk("e", "", "/src/alpha"),
+		mk("f", "", ""), // nothing to group by
 	}, group: true}
 
 	var ids []string
-	for _, it := range m.inColumn(3) { // Done
+	for _, it := range m.inColumn(3) { // Idle
 		ids = append(ids, it.ID)
 	}
-	want := []string{"c", "a", "d", "b", "e"}
-	if strings.Join(ids, "") != strings.Join(want, "") {
-		t.Errorf("grouped order = %v, want %v", ids, want)
+	// Tickets first (sorted), then repos (sorted, recency within), then the
+	// item with no key at all.
+	want := "dbcea f"
+	if got := strings.Join(ids, ""); got != strings.ReplaceAll(want, " ", "") {
+		t.Errorf("grouped order = %v, want %v", ids, strings.ReplaceAll(want, " ", ""))
 	}
 }
 
-// The t key must not be offered when nothing shares a ticket — grouping would
-// visibly do nothing.
-func TestGroupKeyOnlyOfferedWhenTicketsAreShared(t *testing.T) {
+// An item with no ticket and no repo must sort last rather than splitting a
+// run of items that do belong together.
+func TestUngroupableItemsSortLast(t *testing.T) {
+	nothing := store.Item{ID: "x"}
+	if key := nothing.GroupKey(); key != "3" {
+		t.Errorf("GroupKey = %q, want the last bucket", key)
+	}
+	if label := nothing.GroupLabel(); label != "" {
+		t.Errorf("GroupLabel = %q, want empty so no header renders", label)
+	}
+}
+
+// A ticket outranks a repository: a named piece of work is more specific than
+// the directory it happens in.
+func TestTicketOutranksRepoAsAGroupKey(t *testing.T) {
+	both := store.Item{Ticket: "CPLAT-1", Repo: "/src/a"}
+	if got := both.GroupLabel(); got != "CPLAT-1" {
+		t.Errorf("GroupLabel = %q, want the ticket", got)
+	}
+	repoOnly := store.Item{Repo: "/src/a"}
+	if both.GroupKey() >= repoOnly.GroupKey() {
+		t.Error("a ticketed item must sort before a repo-only one")
+	}
+}
+
+// The t key must not be offered when grouping would visibly do nothing.
+// Sharing is judged per column, because grouping is per column: two sessions
+// in one repo sitting in different columns are not brought together by it.
+func TestGroupKeyOnlyOfferedWhenAGroupIsShared(t *testing.T) {
 	lone := Model{items: []store.Item{
-		{ID: "a", Ticket: "CPLAT-1", State: store.StateDone},
-		{ID: "b", Ticket: "CPLAT-2", State: store.StateDone},
+		{ID: "a", Ticket: "CPLAT-1", Repo: "/src/a", State: store.StateDone},
+		{ID: "b", Ticket: "CPLAT-2", Repo: "/src/b", State: store.StateDone},
 	}, w: 140}
 	if h := lone.renderHints(); strings.Contains(h, "t group") {
-		t.Errorf("offered grouping with no shared ticket: %q", h)
+		t.Errorf("offered grouping when nothing is shared: %q", h)
 	}
-	shared := lone
-	shared.items = append(shared.items, store.Item{ID: "c", Ticket: "CPLAT-1",
-		State: store.StateDone})
-	if h := shared.renderHints(); !strings.Contains(h, "t group") {
-		t.Errorf("did not offer grouping when a ticket is shared: %q", h)
+
+	// Same repo, same column — now grouping does something.
+	sharedRepo := Model{items: []store.Item{
+		{ID: "a", Repo: "/src/a", State: store.StateDone},
+		{ID: "b", Repo: "/src/a", State: store.StateDone},
+	}, w: 140}
+	if h := sharedRepo.renderHints(); !strings.Contains(h, "t group") {
+		t.Errorf("did not offer grouping for two sessions in one repo: %q", h)
+	}
+
+	// Same repo, different columns — grouping would not bring them together.
+	acrossColumns := Model{items: []store.Item{
+		{ID: "a", Repo: "/src/a", State: store.StateDone},
+		{ID: "b", Repo: "/src/a", State: store.StateWorking},
+	}, w: 140}
+	if h := acrossColumns.renderHints(); strings.Contains(h, "t group") {
+		t.Errorf("offered grouping across columns, which it cannot do: %q", h)
+	}
+}
+
+// A group header names each run once. A repo header shows the directory name
+// the user calls it by, not the full path.
+func TestGroupHeadersNameEachRunOnce(t *testing.T) {
+	m := board(148, 24,
+		store.Item{ID: "a", Repo: "/Users/x/src/ops-k8s", Title: "first",
+			State: store.StateDone, StateSince: time.Now()},
+		store.Item{ID: "b", Repo: "/Users/x/src/ops-k8s", Title: "second",
+			State: store.StateDone, StateSince: time.Now()},
+	)
+	m.group = true
+	m.col = 3
+	out := m.View()
+	if n := strings.Count(out, "ops-k8s"); n != 3 {
+		// One header plus each card's own repo label.
+		t.Errorf("ops-k8s appears %d times, want 1 header + 2 card labels:\n%s", n, out)
+	}
+	if strings.Contains(out, "/Users/x/src") {
+		t.Errorf("header used the full path:\n%s", out)
 	}
 }
 

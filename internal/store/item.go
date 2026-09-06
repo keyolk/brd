@@ -76,6 +76,38 @@ func (i Item) Column() string {
 // Age is how long the item has held its current state.
 func (i Item) Age() time.Duration { return time.Since(i.StateSince) }
 
+// GroupKey is what the board groups this item under.
+//
+// A ticket when there is one, the repository otherwise. Grouping by ticket
+// alone was almost inert: on a live board of 19 items only 2 carried a ticket,
+// and those two were different tickets, so the grouped view was identical to
+// the ungrouped one. Nearly every item has a repository, and several sessions
+// in one repository is the shape the board actually holds.
+//
+// The prefix keeps the two kinds sortable and distinguishable without a second
+// field: a ticket sorts before a repository, because a named piece of work is
+// more specific than the directory it happens in.
+func (i Item) GroupKey() string {
+	if i.Ticket != "" {
+		return "1" + i.Ticket
+	}
+	if i.Repo != "" {
+		return "2" + i.Repo
+	}
+	// Nothing to group by. Sorts last, so unattributable items do not split
+	// a run of items that do belong together.
+	return "3"
+}
+
+// GroupLabel is the header shown above a group, or "" for items with nothing
+// to group by.
+func (i Item) GroupLabel() string {
+	if i.Ticket != "" {
+		return i.Ticket
+	}
+	return i.Repo
+}
+
 // Upsert creates or refreshes an item, applying only the fields a given hook
 // event actually knows.
 //

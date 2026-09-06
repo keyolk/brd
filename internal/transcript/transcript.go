@@ -125,18 +125,32 @@ func Read(path string) Facts {
 // ticket in the branch name, so the branch is the one place it is guaranteed
 // to appear — and it is there before any PR exists, which is what makes it a
 // better grouping key than the PR.
-var ticketPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9]+-\d+)\b`)
+//
+// Case-insensitive because branches are typed by hand and the case slips:
+// `cplat-11794-count-abandoned-handshakes` sits in the same repo as
+// `CPLAT-11794/cursor-cli-connector-alias` and is the same ticket. Requiring
+// uppercase silently dropped those.
+var ticketPattern = regexp.MustCompile(`(?i)\b([a-z][a-z0-9]{1,9}-\d+)\b`)
 
-// TicketFrom pulls a JIRA key out of a branch name.
+// TicketFrom pulls a JIRA key out of a branch name, normalized to uppercase.
 //
 // Both separators in use are handled by the same pattern: `CPLAT-11964/desc`
-// and `CPLAT-11993-gestalt-image-tag`. A branch with no key — `main`,
-// `follow-the-work` — yields nothing, and that session simply stays grouped by
-// repository.
+// and `CPLAT-11993-gestalt-image-tag`. Normalizing the case is what makes the
+// two spellings of one ticket group together rather than sitting apart.
+//
+// A branch with no key — `main`, `follow-the-work`, `CPLAT-zerosoda-mirror`
+// (a project prefix with no number) — yields nothing, and that session groups
+// by repository instead.
 func TicketFrom(branch string) string {
+	// A detached checkout records its state as prose, not a branch name, and
+	// "detached at 9d834e4d2" contains nothing worth matching. Rejecting it
+	// explicitly keeps a stray match out of the ticket column.
+	if strings.HasPrefix(branch, "(") {
+		return ""
+	}
 	m := ticketPattern.FindStringSubmatch(branch)
 	if m == nil {
 		return ""
 	}
-	return m[1]
+	return strings.ToUpper(m[1])
 }

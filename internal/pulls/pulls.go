@@ -12,11 +12,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/brd/internal/transcript"
 )
 
 // pollTimeout bounds one gh invocation. Measured at ~1s against a live repo;
@@ -218,12 +218,13 @@ func rollup(pr ghPR) string {
 // The branch is where the local convention guarantees it (the PR guard refuses
 // a PR whose branch lacks one), and it is set before the PR exists. The title
 // is the fallback for a PR opened from a branch that predates the convention.
+//
+// It delegates so that a PR and the session that opened it can never disagree
+// about which ticket they belong to — matching on different patterns is how a
+// PR ends up in a group of its own.
 func TicketFrom(branch, title string) string {
-	if t := ticketPattern.FindString(branch); t != "" {
+	if t := transcript.TicketFrom(branch); t != "" {
 		return t
 	}
-	return ticketPattern.FindString(title)
+	return transcript.TicketFrom(title)
 }
-
-// ticketPattern matches the JIRA keys in use here: CPLAT-11964, DINF-4659.
-var ticketPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]+-\d+\b`)

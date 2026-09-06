@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -115,8 +116,26 @@ func runList() error {
 		if len(in) == 0 {
 			continue
 		}
+		// Sorted by group so the text board reads the way the TUI's grouped
+		// view does. There is no toggle here: a one-shot listing has nowhere
+		// to put a mode, and grouping never loses information.
+		sort.SliceStable(in, func(a, b int) bool {
+			return in[a].GroupKey() < in[b].GroupKey()
+		})
+
 		fmt.Printf("\n%s (%d)\n", col.Title, len(in))
+		lastGroup := ""
 		for _, it := range in {
+			if key := it.GroupKey(); key != lastGroup {
+				lastGroup = key
+				if label := it.GroupLabel(); label != "" {
+					name := label
+					if it.Ticket == "" {
+						name = tui.RepoName(label)
+					}
+					fmt.Printf("  %s\n", name)
+				}
+			}
 			// Stamp then age: the clock time is the fixed point you correlate
 			// against, the age is the same fact in the form that scans faster.
 			when := fmt.Sprintf("%s %s", tui.Stamp(it.StateSince), tui.ShortAge(it.Age()))
@@ -127,13 +146,16 @@ func runList() error {
 			if it.Live {
 				pulse = "●"
 			}
-			fmt.Printf("%s %-13s %-18s %-22s %s\n",
-				pulse, when, why, tui.RepoName(it.Repo), tui.Label(it))
+			// Rows are indented under their group header rather than
+			// carrying a repo column: the heading already names it, and a
+			// blank column in its place wasted 22 of them.
+			fmt.Printf("  %s %-13s %-18s %s\n",
+				pulse, when, why, tui.Label(it))
 			for _, c := range it.Children {
-				fmt.Printf("%18s└ %s %s\n", "", c.Kind, c.Label)
+				fmt.Printf("%20s└ %s %s\n", "", c.Kind, c.Label)
 			}
 			if badge, _ := tui.PullBadge(tui.PullsFor(it, prs)); badge != "" {
-				fmt.Printf("%18s└ %s\n", "", badge)
+				fmt.Printf("%20s└ %s\n", "", badge)
 			}
 		}
 	}

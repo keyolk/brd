@@ -72,12 +72,28 @@ Reading it is cheap enough for a hook: the records sit near the end of the file
 — never more than 27 lines from it across 12 sampled transcripts — so brd reads
 the last 256 KiB, a few milliseconds even on a 3 MB transcript.
 
-### Grouping by ticket
+### Grouping: ticket first, then repository
 
 The local convention puts the ticket in the branch name (`CPLAT-11964/desc`,
 `CPLAT-11993-gestalt-image-tag`), and a PR guard enforces it, so the branch is
 the one place it is guaranteed — and it is there before any PR exists, which is
 what makes it a better grouping key than the PR.
+
+Grouping by ticket **alone** was almost inert, though. On a live board of 19
+items only 2 carried a ticket, and they were different tickets, so the grouped
+view was identical to the ungrouped one. The reasons split three ways: 7 items
+had no branch at all (detached checkouts), 7 were on `main` or `master`, and
+two real tickets were missed by a case-sensitive pattern — `cplat-11794-…` is
+the same ticket as `CPLAT-11794/…`.
+
+So the key falls back to the repository, which nearly every item has. Measured
+on the same board that grouped 3 sessions in one column and 4 in another. A
+ticket still outranks a repository, because a named piece of work is more
+specific than the directory it happens in.
+
+Sharing is judged per column, because grouping is per column: two sessions in
+one repository sitting in different columns are not brought together by it, so
+the `t` key is not offered for them.
 
 ### The distinction that matters
 

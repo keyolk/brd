@@ -141,15 +141,11 @@ func (m Model) inColumn(i int) []store.Item {
 		}
 	}
 	if m.group {
-		// Ticketed items first, grouped together; the rest keep recency order
-		// below them. A stable sort is required — within one ticket, recency
-		// is still the order that makes sense.
+		// A stable sort, so recency still orders items inside one group —
+		// which is the order that makes sense once you are looking at a
+		// single ticket or repository.
 		sort.SliceStable(out, func(a, b int) bool {
-			ta, tb := out[a].Ticket, out[b].Ticket
-			if (ta == "") != (tb == "") {
-				return ta != ""
-			}
-			return ta < tb
+			return out[a].GroupKey() < out[b].GroupKey()
 		})
 	}
 	return out
@@ -402,18 +398,25 @@ func PullBadge(prs []store.Pull) (text string, attention bool) {
 	return label + " in review", false
 }
 
-// sharedTickets reports whether any ticket covers more than one item — the
-// only situation where grouping changes what the board looks like.
-func (m Model) sharedTickets() bool {
-	seen := map[string]bool{}
-	for _, it := range m.items {
-		if it.Ticket == "" {
-			continue
+// sharedGroups reports whether any group covers more than one item — the only
+// situation where grouping changes what the board looks like.
+//
+// This is per-column, because grouping is per-column: two sessions in one
+// repository that sit in different columns are not brought together by it, so
+// offering the key for them would be a promise the board does not keep.
+func (m Model) sharedGroups() bool {
+	for i := range Columns {
+		seen := map[string]bool{}
+		for _, it := range m.inColumn(i) {
+			key := it.GroupKey()
+			if key == "3" {
+				continue // nothing to group by
+			}
+			if seen[key] {
+				return true
+			}
+			seen[key] = true
 		}
-		if seen[it.Ticket] {
-			return true
-		}
-		seen[it.Ticket] = true
 	}
 	return false
 }
