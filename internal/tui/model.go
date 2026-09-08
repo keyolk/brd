@@ -213,6 +213,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Under a Korean input source the shortcut keys arrive as jamo (`q` -> `ㅂ`).
+	// Rewrite them to the Latin key at the same physical position so shortcuts
+	// fire without switching the input source back. Unconditional: this TUI has
+	// no text entry, so no key is ever meant as a literal character.
+	msg = normalizeCJKKey(msg)
+
 	switch msg.String() {
 	case "q", "ctrl+c", "esc":
 		if m.detail {
