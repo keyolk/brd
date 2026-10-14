@@ -643,3 +643,51 @@ func TestSelectionFollowsTheItemAcrossReorders(t *testing.T) {
 		t.Errorf("detail pane is not showing s2:\n%s", out)
 	}
 }
+
+// An info message expires on its own; a timer armed for an older message must
+// not clear a newer one.
+func TestInfoStatusExpiresAndIsSeqGuarded(t *testing.T) {
+	m := board(140, 20)
+	if cmd := m.setStatus(statusInfo, "first"); cmd == nil {
+		t.Fatal("info status armed no expiry")
+	}
+	stale := m.statusSeq
+	m.setStatus(statusInfo, "second")
+
+	next, _ := m.Update(statusExpiredMsg{seq: stale})
+	m = next.(Model)
+	if m.status != "second" {
+		t.Fatalf("stale expiry cleared the newer message: %q", m.status)
+	}
+	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
+	if got := next.(Model).status; got != "" {
+		t.Errorf("info status survived its expiry: %q", got)
+	}
+}
+
+// An error stays until the user presses a key — a poll failing every minute
+// used to cover the hint bar for good, because nothing ever cleared it.
+func TestErrorStatusPersistsUntilTheNextKey(t *testing.T) {
+	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	next, _ := m.Update(pollMsg{err: errString("gh: not logged in")})
+	m = next.(Model)
+	if m.statusLvl != statusError || !strings.Contains(m.status, "not logged in") {
+		t.Fatalf("poll failure not shown as an error: %q (lvl %d)", m.status, m.statusLvl)
+	}
+	if cmd := m.setStatus(statusError, m.status); cmd != nil {
+		t.Error("error status armed an expiry timer")
+	}
+	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
+	m = next.(Model)
+	if m.status == "" {
+		t.Fatal("error status expired on a timer")
+	}
+	next, _ = m.handleKey(keyMsg("j"))
+	if got := next.(Model).status; got != "" {
+		t.Errorf("error status survived a keystroke: %q", got)
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

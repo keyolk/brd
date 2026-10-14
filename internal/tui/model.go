@@ -82,6 +82,12 @@ type Model struct {
 	detail bool   // detail pane open for the selected item
 	group  bool   // group items by JIRA ticket
 	status string // transient feedback for an action that had nothing to say
+	// statusLvl decides how the status looks and how long it lives: info
+	// expires on a timer, error stays until the next keystroke.
+	statusLvl statusLevel
+	// statusSeq numbers every status set, so an expiry timer armed for an
+	// older message cannot clear a newer one.
+	statusSeq int
 	pulls  []store.Pull
 	// polling guards against stacking gh calls when one runs long: the timer
 	// keeps firing regardless of how slow the network is.
@@ -127,6 +133,34 @@ func pollTick() tea.Cmd {
 }
 
 type pollTimerMsg struct{}
+
+type statusLevel int
+
+const (
+	statusInfo statusLevel = iota
+	statusError
+)
+
+// statusTTL is how long an info message stays before the hint bar returns.
+// Long enough to read a short sentence, short enough that the keys are back
+// before the user goes looking for them.
+const statusTTL = 4 * time.Second
+
+// statusExpiredMsg clears an info status, if it is still the one with seq.
+type statusExpiredMsg struct{ seq int }
+
+// setStatus shows text at the given level. Info returns the command that
+// expires it; error returns nil because it is cleared by the next key —
+// a failure should not vanish before the user has seen it.
+func (m *Model) setStatus(lvl statusLevel, text string) tea.Cmd {
+	m.statusSeq++
+	m.status, m.statusLvl = text, lvl
+	if lvl != statusInfo {
+		return nil
+	}
+	seq := m.statusSeq
+	return tea.Tick(statusTTL, func(time.Time) tea.Msg { return statusExpiredMsg{seq: seq} })
+}
 
 // inColumn returns the items in column i, in board order.
 func (m Model) inColumn(i int) []store.Item {
@@ -225,9 +259,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			// A PR poll failing is not a broken board — gh may simply not be
 			// logged in — so it goes to the status line, not m.err.
-			m.status = msg.err.Error()
+			m.setStatus(statusError, "PR poll: "+msg.err.Error())
 		}
 		return m, m.load()
+
+	case statusExpiredMsg:
+		if msg.seq == m.statusSeq && m.statusLvl == statusInfo {
+			m.status = ""
+		}
+		return m, nil
 
 	case loadedMsg:
 		m.items, m.pulls, m.err = msg.items, msg.pulls, msg.err
@@ -243,7 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jumpMsg:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(statusError, msg.err.Error())
 		}
 		return m, m.load()
 
@@ -259,6 +299,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// fire without switching the input source back. Unconditional: this TUI has
 	// no text entry, so no key is ever meant as a literal character.
 	msg = normalizeCJKKey(msg)
+
+	// An error has been on screen since it arrived; any keystroke means the
+	// user has seen it, so the hint bar comes back. The key still acts.
+	if m.status != "" && m.statusLvl == statusError {
+		m.status = ""
+	}
 
 	switch msg.String() {
 	case "q", "ctrl+c":

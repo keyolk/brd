@@ -102,7 +102,13 @@ func (m Model) renderHints() string {
 	// A message from the last action outranks the key list: it is the answer
 	// to a keystroke the user just pressed, and it is transient.
 	if m.status != "" {
-		return lipgloss.NewStyle().Foreground(blockedFg).
+		// Red is reserved for failures; an informational message in the
+		// same color reads as something having gone wrong.
+		fg := accentFg
+		if m.statusLvl == statusError {
+			fg = blockedFg
+		}
+		return lipgloss.NewStyle().Foreground(fg).
 			Render(truncate(m.status, m.w))
 	}
 
