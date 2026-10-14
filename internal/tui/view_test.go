@@ -9,6 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/toast"
 )
 
 // board builds a model with fixed items, bypassing the database. The view is
@@ -127,7 +129,7 @@ func TestEmptyBoardExplainsItself(t *testing.T) {
 func TestHintsOnlyListLiveKeys(t *testing.T) {
 	t.Run("empty board hides navigation", func(t *testing.T) {
 		hints := board(140, 20).renderHints()
-		if strings.Contains(hints, "hjkl") {
+		if strings.Contains(hints, "j down") || strings.Contains(hints, "h prev") {
 			t.Errorf("empty board offered navigation: %q", hints)
 		}
 		if !strings.Contains(hints, "q quit") {
@@ -291,11 +293,11 @@ func TestEndedItemsLeaveTheBoard(t *testing.T) {
 	}
 }
 
-// truncate must not split a multi-byte rune — most titles here are Korean.
+// render.Truncate must not split a multi-byte rune — most titles here are Korean.
 func TestTruncateIsRuneSafe(t *testing.T) {
 	const s = "칸반 보드를 만들어서 진척도를 보자"
 	for w := 1; w <= 40; w++ {
-		got := truncate(s, w)
+		got := render.Truncate(s, w)
 		if lipglossWidth(got) > w {
 			t.Errorf("truncate(%d) = %q, %d cols wide", w, got, lipglossWidth(got))
 		}
@@ -565,8 +567,8 @@ func TestGroupHeadersNameEachRunOnce(t *testing.T) {
 
 // A failed action must say so where the user is looking, and outrank the keys.
 func TestStatusReplacesTheHintBar(t *testing.T) {
-	m := Model{items: []store.Item{{ID: "a", State: store.StateDone}},
-		w: 140, status: "no live tmux pane — R resumes it instead"}
+	m := Model{items: []store.Item{{ID: "a", State: store.StateDone}}, w: 140}
+	m.notify("jump", toast.Error, "no live tmux pane — R resumes it instead")
 	h := m.renderHints()
 	if !strings.Contains(h, "no live tmux pane") {
 		t.Errorf("status not shown: %q", h)
@@ -600,8 +602,8 @@ func TestJumpDoesNotCheckThePaneInsideUpdate(t *testing.T) {
 	t.Setenv("TMUX", "")
 	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
 	next, cmd := m.handleKey(keyMsg("J"))
-	if got := next.(Model).status; got != "" {
-		t.Errorf("status set synchronously by J: %q", got)
+	if got := next.(Model).toasts.Items(); len(got) != 0 {
+		t.Errorf("toast set synchronously by J: %+v", got)
 	}
 	if cmd == nil {
 		t.Fatal("J returned no command")
@@ -644,47 +646,27 @@ func TestSelectionFollowsTheItemAcrossReorders(t *testing.T) {
 	}
 }
 
-// An info message expires on its own; a timer armed for an older message must
-// not clear a newer one.
-func TestInfoStatusExpiresAndIsSeqGuarded(t *testing.T) {
-	m := board(140, 20)
-	if cmd := m.setStatus(statusInfo, "first"); cmd == nil {
-		t.Fatal("info status armed no expiry")
-	}
-	stale := m.statusSeq
-	m.setStatus(statusInfo, "second")
-
-	next, _ := m.Update(statusExpiredMsg{seq: stale})
-	m = next.(Model)
-	if m.status != "second" {
-		t.Fatalf("stale expiry cleared the newer message: %q", m.status)
-	}
-	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
-	if got := next.(Model).status; got != "" {
-		t.Errorf("info status survived its expiry: %q", got)
-	}
-}
-
-// An error stays until the user presses a key — a poll failing every minute
-// used to cover the hint bar for good, because nothing ever cleared it.
-func TestErrorStatusPersistsUntilTheNextKey(t *testing.T) {
+// An error stays until the user presses a key after seeing it — a poll
+// failing every minute used to cover the hint bar for good, because nothing
+// ever cleared it.
+func TestErrorToastPersistsUntilAKeyAfterItWasSeen(t *testing.T) {
 	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
 	next, _ := m.Update(pollMsg{err: errString("gh: not logged in")})
 	m = next.(Model)
-	if m.statusLvl != statusError || !strings.Contains(m.status, "not logged in") {
-		t.Fatalf("poll failure not shown as an error: %q (lvl %d)", m.status, m.statusLvl)
+	got := m.toasts.Items()
+	if len(got) != 1 || got[0].Level != toast.Error || !strings.Contains(got[0].Text, "not logged in") {
+		t.Fatalf("poll failure not shown as an error: %+v", got)
 	}
-	if cmd := m.setStatus(statusError, m.status); cmd != nil {
-		t.Error("error status armed an expiry timer")
+	if h := m.renderHints(); !strings.Contains(h, "not logged in") {
+		t.Errorf("error not in the bottom bar: %q", h)
 	}
-	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
-	m = next.(Model)
-	if m.status == "" {
-		t.Fatal("error status expired on a timer")
-	}
+	// The kit ignores a key within MinDwell of the error landing (it was
+	// likely already in flight); toast.Queue has no injectable clock, so the
+	// test waits it out.
+	time.Sleep(toast.MinDwell)
 	next, _ = m.handleKey(keyMsg("j"))
-	if got := next.(Model).status; got != "" {
-		t.Errorf("error status survived a keystroke: %q", got)
+	if got := next.(Model).toasts.Items(); len(got) != 0 {
+		t.Errorf("error toast survived a keystroke: %+v", got)
 	}
 }
 
@@ -708,18 +690,19 @@ func TestFailedLoadKeepsTheLastGoodBoard(t *testing.T) {
 	if sel, ok := m.selected(); !ok || sel.ID != "s1" {
 		t.Errorf("failed load lost the selection")
 	}
-	if m.statusLvl != statusError || !strings.Contains(m.status, "database is locked") {
-		t.Errorf("failure not reported as an error status: %q", m.status)
+	if got := m.toasts.Items(); len(got) != 1 || got[0].Level != toast.Error || !strings.Contains(got[0].Text, "database is locked") {
+		t.Errorf("failure not reported as an error toast: %+v", got)
 	}
 	if out := m.View(); !strings.Contains(out, "alpha") {
 		t.Errorf("board not rendered after a failed load:\n%s", out)
 	}
 
-	// The next good load says the board is current again, as info.
+	// The next good load says the board is current again, as info that
+	// replaces the error (same source) and expires on its own tick.
 	next, cmd := m.Update(loadedMsg{items: []store.Item{a}, pulls: m.pulls})
 	m = next.(Model)
-	if m.statusLvl != statusInfo || cmd == nil {
-		t.Errorf("recovery not announced as expiring info: %q (lvl %d)", m.status, m.statusLvl)
+	if got := m.toasts.Items(); len(got) != 1 || got[0].Level != toast.Info || cmd == nil {
+		t.Errorf("recovery not announced as expiring info replacing the error: %+v", got)
 	}
 
 	// Items fresh but PR table unreadable: take the items, keep the PRs.

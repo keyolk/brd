@@ -14,9 +14,13 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/pulls"
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/tuikit/async"
+	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/prefs"
+	"github.com/keyolk/tuikit/theme"
+	"github.com/keyolk/tuikit/toast"
 )
 
 // Column is one board column.
@@ -87,23 +91,48 @@ type Model struct {
 	// card at a time instead of snapping back to the top.
 	scroll []int
 	w, h   int
-	detail bool   // detail pane open for the selected item
-	group  bool   // group items by JIRA ticket
-	status string // transient feedback for an action that had nothing to say
-	// statusLvl decides how the status looks and how long it lives: info
-	// expires on a timer, error stays until the next keystroke.
-	statusLvl statusLevel
-	// statusSeq numbers every status set, so an expiry timer armed for an
-	// older message cannot clear a newer one.
-	statusSeq int
-	pulls     []store.Pull
+	detail bool // detail pane open for the selected item
+	group  bool // group items by JIRA ticket
+	// toasts carry the outcome of actions and background work. Info expires
+	// on its own tick; an error stays until a key after it has been seen.
+	toasts toast.Queue
+	ascii  bool // toast prefixes as words, for terminals without ✓/✗
+	pulls  []store.Pull
 	// polling guards against stacking gh calls when one runs long: the timer
 	// keeps firing regardless of how slow the network is.
 	polling bool
+
+	km      *keys.Keymap // nil means the defaults; see keymap()
+	help    bool         // help overlay open
+	helpOff int          // help scroll offset
+
+	// saved is the UI state last handed to the save debounce; saveGen drops
+	// a debounce tick that a newer change superseded.
+	saved   uiState
+	saveGen async.Gen
+	// quitting waits for the final state write before tea.Quit, and saveErr
+	// keeps that write's failure for the caller once the screen is gone.
+	quitting bool
+	saveErr  error
 }
 
-// New builds the board model.
-func New(db *store.DB) Model { return Model{db: db} }
+// New builds the board model, with the user's key overrides and the UI state
+// the last run left behind. Neither failing stops the board: the defaults are
+// used and an error toast says what was ignored.
+func New(db *store.DB) Model {
+	m := Model{db: db, ascii: theme.DetectGlyphs(appName).ASCII}
+	km, err := baseKeymap.LoadOverrides(KeysPath())
+	m.km = &km
+	if err != nil {
+		m.toasts, _ = toast.Push(m.toasts, toast.Toast{Source: "keys", Text: err.Error(), Level: toast.Error})
+	}
+	st, err := prefs.Load(appName, uiState{})
+	if err != nil {
+		m.toasts, _ = toast.Push(m.toasts, toast.Toast{Source: "prefs", Text: "UI state ignored: " + err.Error(), Level: toast.Error})
+	}
+	m.restore(st)
+	return m
+}
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.load(), tick(), pollTick())
@@ -141,34 +170,6 @@ func pollTick() tea.Cmd {
 }
 
 type pollTimerMsg struct{}
-
-type statusLevel int
-
-const (
-	statusInfo statusLevel = iota
-	statusError
-)
-
-// statusTTL is how long an info message stays before the hint bar returns.
-// Long enough to read a short sentence, short enough that the keys are back
-// before the user goes looking for them.
-const statusTTL = 4 * time.Second
-
-// statusExpiredMsg clears an info status, if it is still the one with seq.
-type statusExpiredMsg struct{ seq int }
-
-// setStatus shows text at the given level. Info returns the command that
-// expires it; error returns nil because it is cleared by the next key —
-// a failure should not vanish before the user has seen it.
-func (m *Model) setStatus(lvl statusLevel, text string) tea.Cmd {
-	m.statusSeq++
-	m.status, m.statusLvl = text, lvl
-	if lvl != statusInfo {
-		return nil
-	}
-	seq := m.statusSeq
-	return tea.Tick(statusTTL, func(time.Time) tea.Msg { return statusExpiredMsg{seq: seq} })
-}
 
 // inColumn returns the items in column i, in board order.
 func (m Model) inColumn(i int) []store.Item {
@@ -255,7 +256,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Any message can move the cursor or change what a column holds, so the
 	// scroll offsets are re-fitted once here rather than at every call site.
 	nm.syncScroll()
+	// Likewise any message can change the state worth keeping (a refresh
+	// moves sel when its item leaves the column), so the save is armed here.
+	if save := nm.armSave(); save != nil {
+		cmd = tea.Batch(cmd, save)
+	}
 	return nm, cmd
+}
+
+// notify queues a toast and returns the tick that expires it.
+func (m *Model) notify(source string, lvl toast.Level, text string) tea.Cmd {
+	var cmd tea.Cmd
+	m.toasts, cmd = toast.Push(m.toasts, toast.Toast{Source: source, Text: text, Level: lvl})
+	return cmd
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -276,37 +289,52 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pollMsg:
 		m.polling = false
+		var cmd tea.Cmd
 		if msg.err != nil {
 			// A PR poll failing is not a broken board — gh may simply not be
-			// logged in — so it goes to the status line.
-			m.setStatus(statusError, "PR poll: "+msg.err.Error())
+			// logged in — so it goes to a toast.
+			cmd = m.notify("poll", toast.Error, "PR poll: "+msg.err.Error())
 		}
-		return m, m.load()
+		return m, tea.Batch(cmd, m.load())
 
-	case statusExpiredMsg:
-		if msg.seq == m.statusSeq && m.statusLvl == statusInfo {
-			m.status = ""
+	case toast.Expired:
+		m.toasts = toast.Update(m.toasts, msg)
+		return m, nil
+
+	case saveTickMsg:
+		if !m.saveGen.Is(msg.gen) {
+			return m, nil // a newer change re-armed the debounce
+		}
+		return m, prefs.SaveCmd(appName, m.saved)
+
+	case prefs.Saved:
+		if m.quitting {
+			m.saveErr = msg.Err
+			return m, tea.Quit
+		}
+		if msg.Err != nil {
+			return m, m.notify("prefs", toast.Error, "saving UI state: "+msg.Err.Error())
 		}
 		return m, nil
 
 	case loadedMsg:
-		// A failed read keeps the last good board and says so in the status
-		// line. Blanking the board for a transient error (a locked database
+		// A failed read keeps the last good board and says so in a toast.
+		// Blanking the board for a transient error (a locked database
 		// mid-write) flashed an error screen for one tick and threw away
 		// everything the user was looking at, cursor included.
 		if msg.err != nil {
 			m.loadFailed = true
-			m.setStatus(statusError, "refresh failed, showing last good board: "+msg.err.Error())
-			return m, nil
+			return m, m.notify("load", toast.Error, "refresh failed, showing last good board: "+msg.err.Error())
 		}
-		var cmd tea.Cmd
+		var cmds []tea.Cmd
 		if m.loadFailed {
+			// Same source as the failure, so this replaces the error.
 			m.loadFailed = false
-			cmd = m.setStatus(statusInfo, "board refreshed")
+			cmds = append(cmds, m.notify("load", toast.Info, "board refreshed"))
 		}
 		m.items = msg.items
 		if msg.pullsErr != nil {
-			m.setStatus(statusError, "reading PRs: "+msg.pullsErr.Error())
+			cmds = append(cmds, m.notify("pulls", toast.Error, "reading PRs: "+msg.pullsErr.Error()))
 		} else {
 			m.pulls = msg.pulls
 		}
@@ -318,13 +346,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.selected(); !ok {
 			m.detail = false
 		}
-		return m, cmd
+		return m, tea.Batch(cmds...)
 
 	case jumpMsg:
+		var cmd tea.Cmd
 		if msg.err != nil {
-			m.setStatus(statusError, msg.err.Error())
+			cmd = m.notify("jump", toast.Error, msg.err.Error())
 		}
-		return m, m.load()
+		return m, tea.Batch(cmd, m.load())
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -333,88 +362,105 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Under a Korean input source the shortcut keys arrive as jamo (`q` -> `ㅂ`).
-	// Rewrite them to the Latin key at the same physical position so shortcuts
-	// fire without switching the input source back. Unconditional: this TUI has
-	// no text entry, so no key is ever meant as a literal character.
-	msg = normalizeCJKKey(msg)
-
-	// An error has been on screen since it arrived; any keystroke means the
-	// user has seen it, so the hint bar comes back. The key still acts.
-	if m.status != "" && m.statusLvl == statusError {
-		m.status = ""
+	// An error has been on screen since it arrived; a keystroke after it was
+	// seen means the user has read it, so the hint bar comes back. The key
+	// still acts.
+	m.toasts = toast.OnKey(m.toasts)
+	if m.quitting {
+		return m, nil // the final save is in flight; quit follows it
 	}
-
-	switch msg.String() {
-	case "q", "ctrl+c":
-		if m.detail {
-			m.detail = false
-			return m, nil
-		}
-		return m, tea.Quit
-
-	case "esc":
-		// esc only closes. It is the key people press to back out of
-		// something, and on the bare board that used to quit the app — one
-		// reflexive keystroke too many lost the board entirely.
-		m.detail = false
+	b, ok := m.keymap().Resolve(m.active(), msg, m.canRun)
+	if !ok {
 		return m, nil
+	}
+	return m.run(b.Action)
+}
 
-	case "j", "down":
+// run performs one named action from the binding table.
+func (m Model) run(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case actQuit:
+		// Write the final state, then quit when the write reports back: a
+		// debounce still pending would otherwise die with the program.
+		m.quitting = true
+		m.saved = m.uiState()
+		return m, prefs.SaveCmd(appName, m.saved)
+
+	case actDetailClose:
+		// esc and q back out of the pane. On the bare board esc is unbound:
+		// it used to quit, and one reflexive keystroke too many lost the
+		// board entirely.
+		m.detail = false
+
+	case actHelp:
+		if m.help {
+			return m.run(actHelpClose)
+		}
+		m.help, m.helpOff = true, 0
+		m.toasts = toast.Hold(m.toasts) // toasts wait while the overlay is up
+	case actHelpClose:
+		m.help = false
+		var cmd tea.Cmd
+		m.toasts, cmd = toast.Release(m.toasts)
+		return m, cmd
+	case actHelpDown:
+		m.helpOff++
+	case actHelpUp:
+		m.helpOff = max(0, m.helpOff-1)
+
+	case actDown:
 		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
 			m.setRow((m.row + 1) % n)
 		}
-	case "k", "up":
+	case actUp:
 		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
 			m.setRow((m.row - 1 + n) % n)
 		}
-	case "h", "left":
+	case actPrevCol:
 		m.col = (m.col - 1 + len(Columns)) % len(Columns)
 		m.setRow(m.row)
-	case "l", "right":
+	case actNextCol:
 		m.col = (m.col + 1) % len(Columns)
 		m.setRow(m.row)
 
-	case "b":
+	case actBlocked:
 		// Jump to the first blocked item — the one keystroke that answers
 		// "who is waiting on me" without navigating there.
 		m.col, m.detail = 0, false
 		m.setRow(0)
 
-	case "enter", " ":
+	case actDetail:
 		if _, ok := m.selected(); ok {
 			m.detail = !m.detail
 		}
 
-	case "t":
+	case actGroup, actUngroup:
 		// Group by ticket. Off by default: it only helps once several
 		// sessions share one, and a board of ungrouped items reads worse
 		// with a header above every single row.
 		// The selection survives the reorder: it is the same item, just at a
 		// new position.
-		m.group = !m.group
+		m.group = action == actGroup
 		m.resolve()
 
-	case "J":
-		// Capital J, so it cannot be hit while navigating with j.
+	case actJump:
+		// Capital J (or g), so it cannot be hit while navigating with j.
 		// No liveness pre-check here: paneFor shells out to tmux, and Update
 		// must not block on a subprocess (a wedged tmux server would freeze
 		// the board). jump() does the same lookup off the UI goroutine and
 		// reports a missing pane through jumpMsg.
 		if it, ok := m.selected(); ok {
-			m.status = ""
 			return m, jump(it.ID)
 		}
 
-	case "R":
+	case actResume:
 		if it, ok := m.selected(); ok {
-			m.status = ""
 			return m, resume(it)
 		}
 
-	case "r":
+	case actRefresh:
 		return m, m.load()
 	}
 	return m, nil
@@ -450,21 +496,6 @@ func RepoName(repo string) string {
 		return "—"
 	}
 	return filepath.Base(repo)
-}
-
-// truncate cuts s to w display columns, on a rune boundary.
-func truncate(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	runes := []rune(s)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > w {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "…"
 }
 
 // pullsFor returns the PRs belonging to an item.

@@ -6,6 +6,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/toast"
 )
 
 // Palette. Only the Blocked column gets a warm color: if every column were
@@ -46,7 +49,37 @@ func (m Model) View() string {
 	} else {
 		body = m.renderColumns(bodyH)
 	}
-	return header + "\n" + body + "\n" + hints
+	frame := header + "\n" + body + "\n" + hints
+	if !m.help {
+		return frame
+	}
+	// Over the board, not instead of it: the user keeps sight of what the
+	// keys act on.
+	return render.Center(render.Dim(frame), m.renderHelp(), m.w, m.h)
+}
+
+var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+	BorderForeground(accentFg).Padding(0, 1)
+
+// renderHelp is the `?` overlay, derived from the binding table so it cannot
+// drift from what the keys do.
+func (m Model) renderHelp() string {
+	sections := m.helpSections()
+	total := 0
+	for i, s := range sections {
+		total += 1 + len(s.Entries) // title + entries
+		if i > 0 {
+			total++ // blank line between sections
+		}
+	}
+	// Content area: the box keeps 2 cells of margin each side and spends 4
+	// on border and padding horizontally, 2 on border vertically.
+	w := min(56, m.w-4) - 4
+	h := min(total, m.h-4-2)
+	if w < 10 || h < 1 {
+		return helpBox.Render("? help needs a larger terminal")
+	}
+	return helpBox.Render(strings.Join(keys.RenderHelp(sections, w, h, m.helpOff), "\n"))
 }
 
 // renderHeader leads with the blocked count, because that is the number the
@@ -83,52 +116,32 @@ func (m Model) renderHeader() string {
 	return left + "  " + strings.Join(parts, dim.Render(" · "))
 }
 
-// renderHints shows only the keys that do something right now.
+// renderHints is the bottom bar: pending toasts, or else the keys that do
+// something right now.
 //
-// A hint bar wider than the terminal truncates from the right, and what
-// falls off is whatever was listed last — so a bar that lists everything
-// hides the keys a lost user needs most. Keys appear here only when they
-// would act.
+// A toast outranks the key list: it is the answer to a keystroke the user
+// just pressed, or news about the board, and it is transient. The keys come
+// from the binding table, filtered by inFooter and dropped from the
+// low-priority end with `…` when narrow; `? help` and `q quit` are pinned.
 func (m Model) renderHints() string {
-	// A message from the last action outranks the key list: it is the answer
-	// to a keystroke the user just pressed, and it is transient.
-	if m.status != "" {
-		// Red is reserved for failures; an informational message in the
-		// same color reads as something having gone wrong.
-		fg := accentFg
-		if m.statusLvl == statusError {
-			fg = blockedFg
-		}
-		return lipgloss.NewStyle().Foreground(fg).
-			Render(truncate(m.status, m.w))
+	if t := toast.View(m.toasts, m.w, m.toastStyles()); t != "" {
+		return t
 	}
-
-	var keys []string
-	if m.detail {
-		keys = append(keys, "esc close")
-	} else if len(m.items) > 0 {
-		keys = append(keys, "hjkl move", "↵ detail")
-	}
-	if _, ok := m.selected(); ok {
-		keys = append(keys, "J jump", "R resume")
-	}
-	if !m.detail && len(m.inColumn(0)) > 0 && m.col != 0 {
-		keys = append(keys, "b blocked")
-	}
-	// Grouping is only worth offering once two items actually share a ticket;
-	// below that it is a key that visibly does nothing.
-	if m.group || m.sharedGroups() {
-		keys = append(keys, "t "+ternary(m.group, "ungroup", "group"))
-	}
-	keys = append(keys, "r refresh", "q quit")
-	return dim.Render(truncate(strings.Join(keys, " · "), m.w))
+	return m.keymap().Footer(m.active(), m.w, m.inFooter, footerStyle)
 }
 
-func ternary(cond bool, yes, no string) string {
-	if cond {
-		return yes
+var footerStyle = keys.FooterStyle{Key: lipgloss.NewStyle(), Desc: dim, More: dim}
+
+// toastStyles keeps red for failures only; an informational message in the
+// same color reads as something having gone wrong.
+func (m Model) toastStyles() toast.Styles {
+	return toast.Styles{
+		Info:    lipgloss.NewStyle().Foreground(accentFg),
+		Success: lipgloss.NewStyle().Foreground(workingFg),
+		Warn:    lipgloss.NewStyle().Foreground(blockedFg),
+		Error:   lipgloss.NewStyle().Foreground(blockedFg).Bold(true),
+		ASCII:   m.ascii,
 	}
-	return no
 }
 
 func (m Model) renderColumns(height int) string {
@@ -155,11 +168,12 @@ func (m Model) renderColumns(height int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, joined...)
 }
 
-// bodyHeight is the terminal height minus the one-line header and the
-// one-line hint bar (both are truncated to a single line), so the columns
-// never overflow into the hint bar and push it off screen.
+// bodyHeight is the terminal height minus the one-line header and the bottom
+// bar — one line of keys, or one line per pending toast — so the columns
+// never overflow into the bar and push it off screen. It reads only model
+// state, so syncScroll in Update and View agree on it.
 func (m Model) bodyHeight() int {
-	return max(3, m.h-2)
+	return max(3, m.h-1-lipgloss.Height(m.renderHints()))
 }
 
 func max(a, b int) int {
@@ -185,7 +199,7 @@ func (m Model) cardBlocks(idx, w int, focused bool) [][]string {
 			if key := it.GroupKey(); key != lastGroup {
 				lastGroup = key
 				if label := it.GroupLabel(); label != "" {
-					lines = append(lines, headStyle.Render(truncate(groupHeader(it), w)))
+					lines = append(lines, headStyle.Render(render.Truncate(groupHeader(it), w)))
 				}
 			}
 		}
@@ -264,7 +278,7 @@ func visibleEnd(heights []int, off, avail int) int {
 func scrolledLines(blocks [][]string, start, end, avail, w int) []string {
 	var lines []string
 	if start > 0 {
-		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↑ %d more", start), w)))
+		lines = append(lines, dim.Render(render.Truncate(fmt.Sprintf("↑ %d more", start), w)))
 	}
 	for _, b := range blocks[start:end] {
 		lines = append(lines, b...)
@@ -275,7 +289,7 @@ func scrolledLines(blocks [][]string, start, end, avail, w int) []string {
 		if len(lines) > room {
 			lines = lines[:max(room, 0)]
 		}
-		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↓ %d more", more), w)))
+		lines = append(lines, dim.Render(render.Truncate(fmt.Sprintf("↓ %d more", more), w)))
 	}
 	if len(lines) > avail {
 		lines = lines[:avail]
@@ -331,7 +345,7 @@ func (m Model) renderColumn(idx int, col Column, w, height int) string {
 	lines := []string{title}
 
 	if len(in) == 0 {
-		lines = append(lines, dim.Render(truncate(col.Hint, w)))
+		lines = append(lines, dim.Render(render.Truncate(col.Hint, w)))
 	}
 	start, end := m.columnWindow(idx, height-1)
 	lines = append(lines, scrolledLines(m.cardBlocks(idx, w, focused), start, end, height-1, w)...)
@@ -369,7 +383,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 	if !it.Live {
 		titleStyle = titleStyle.Foreground(dimFg)
 	}
-	title := titleStyle.Render(truncate(Label(it), w-2))
+	title := titleStyle.Render(render.Truncate(Label(it), w-2))
 
 	// The second line answers "since when, and why here". The stamp comes
 	// first because it is the fixed point you correlate against; the age is
@@ -389,7 +403,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 	}
 	sub := dim.Render(RepoName(it.Repo)) + " " + metaStyle.Render(meta)
 
-	lines := []string{marker + title, "  " + truncate(sub, w-2)}
+	lines := []string{marker + title, "  " + render.Truncate(sub, w-2)}
 
 	// A PR gets its own line rather than being crammed onto the meta line:
 	// it is a different clock (someone else's review, not this session's
@@ -399,7 +413,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 		if attention {
 			style = lipgloss.NewStyle().Foreground(blockedFg)
 		}
-		lines = append(lines, "  "+style.Render(truncate(badge, w-2)))
+		lines = append(lines, "  "+style.Render(render.Truncate(badge, w-2)))
 	}
 	return lines
 }
@@ -491,14 +505,14 @@ func (m Model) renderDetail(height int) string {
 		return dim.Render("nothing selected")
 	}
 	var b strings.Builder
-	b.WriteString(bold.Render(truncate(Label(it), m.w)) + "\n")
+	b.WriteString(bold.Render(render.Truncate(Label(it), m.w)) + "\n")
 
 	row := func(k, v string) {
 		if v == "" {
 			return
 		}
 		b.WriteString(dim.Render(fmt.Sprintf("%-10s ", k)) +
-			truncate(v, m.w-11) + "\n")
+			render.Truncate(v, m.w-11) + "\n")
 	}
 	state := it.State
 	if it.BlockedOn != "" {
@@ -523,11 +537,11 @@ func (m Model) renderDetail(height int) string {
 		b.WriteString("\n" + headStyle.Render(
 			fmt.Sprintf("in flight (%d)", len(it.Children))) + "\n")
 		for _, c := range it.Children {
-			line := fmt.Sprintf("%-12s %-22s %s", c.Kind, truncate(c.Label, 22), c.State)
+			line := fmt.Sprintf("%-12s %-22s %s", c.Kind, render.Truncate(c.Label, 22), c.State)
 			if c.Detail != "" {
 				line += dim.Render("  " + c.Detail)
 			}
-			b.WriteString("  " + truncate(line, m.w-2) + "\n")
+			b.WriteString("  " + render.Truncate(line, m.w-2) + "\n")
 		}
 	}
 	if prs := m.pullsFor(it); len(prs) > 0 {
@@ -538,18 +552,18 @@ func (m Model) renderDetail(height int) string {
 			if p.State == "OPEN" {
 				state = fmt.Sprintf("%s · %s", reviewLabel(p.Review), p.Checks)
 			}
-			line := fmt.Sprintf("#%-6d %-34s %s", p.Number, truncate(p.Title, 34), state)
+			line := fmt.Sprintf("#%-6d %-34s %s", p.Number, render.Truncate(p.Title, 34), state)
 			style := lipgloss.NewStyle()
 			if p.Attention() {
 				style = style.Foreground(blockedFg)
 			}
-			b.WriteString("  " + style.Render(truncate(line, m.w-2)) + "\n")
+			b.WriteString("  " + style.Render(render.Truncate(line, m.w-2)) + "\n")
 		}
 	}
 
 	if it.LastMessage != "" {
 		b.WriteString("\n" + headStyle.Render("last message") + "\n")
-		b.WriteString("  " + truncate(it.LastMessage, m.w-2) + "\n")
+		b.WriteString("  " + render.Truncate(it.LastMessage, m.w-2) + "\n")
 	}
 	// Every line above is truncated to the width, so one string line is one
 	// screen line. Cutting with MaxHeight alone dropped the tail of a long
@@ -558,7 +572,7 @@ func (m Model) renderDetail(height int) string {
 	if len(lines) > height {
 		hidden := len(lines) - (height - 1)
 		lines = append(lines[:height-1], dim.Render(
-			truncate(fmt.Sprintf("↓ %d more lines", hidden), m.w)))
+			render.Truncate(fmt.Sprintf("↓ %d more lines", hidden), m.w)))
 	}
 	return strings.Join(lines, "\n")
 }

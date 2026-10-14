@@ -80,8 +80,16 @@ func runTUI() error {
 	}
 	defer db.Close()
 	p := tea.NewProgram(tui.New(db), tea.WithAltScreen())
-	_, err = p.Run()
-	return err
+	final, err := p.Run()
+	if err != nil {
+		return err
+	}
+	// The last UI state write lands after the screen is gone, so its
+	// failure can only be reported here.
+	if m, ok := final.(tui.Model); ok && m.SaveErr() != nil {
+		fmt.Fprintln(os.Stderr, "brd: saving UI state:", m.SaveErr())
+	}
+	return nil
 }
 
 func runList() error {
