@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/tmux"
 	"github.com/keyolk/tuikit/toast"
 )
 
@@ -594,19 +595,23 @@ func min(a, b int) int {
 	return b
 }
 
-// J must not shell out to tmux inside Update. With TMUX unset paneFor fails
-// fast, so the only way the status could be set synchronously is a pre-check;
-// the handler must instead hand back jump()'s command and leave the verdict to
-// jumpMsg.
+// J must not call tmux inside Update. The fake answers that no pane holds the
+// session, so the only way the status could be set synchronously is a
+// pre-check; the handler must instead hand back jump()'s command and leave
+// the verdict to jumpMsg.
 func TestJumpDoesNotCheckThePaneInsideUpdate(t *testing.T) {
-	t.Setenv("TMUX", "")
+	fake := tmux.NewFake().On("list-panes", "", nil)
 	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	m.tm = tmux.Client{Runner: fake}
 	next, cmd := m.handleKey(keyMsg("J"))
 	if got := next.(Model).toasts.Items(); len(got) != 0 {
 		t.Errorf("toast set synchronously by J: %+v", got)
 	}
 	if cmd == nil {
 		t.Fatal("J returned no command")
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Fatalf("J called tmux inside Update: %v", calls)
 	}
 	msg, ok := cmd().(jumpMsg)
 	if !ok || msg.err == nil || !strings.Contains(msg.err.Error(), "R resumes it instead") {

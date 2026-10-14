@@ -199,6 +199,7 @@ func TestMostRecentStampWins(t *testing.T) {
 // better than pretending it does not exist. Measured on this machine right
 // after install: 8 of 26 live sessions were in exactly this state.
 func TestUnknownLiveSessionsAreAdded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // transcriptFor globs ~/.claude/projects
 	items := []store.Item{{ID: "known", State: store.StateWorking}}
 	live := map[string]Liveness{
 		"known":   liveAt("working", time.Minute),
