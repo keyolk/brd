@@ -68,20 +68,24 @@ const pollInterval = 60 * time.Second
 
 // Model is the board.
 type Model struct {
-	db     *store.DB
-	items  []store.Item
+	db    *store.DB
+	items []store.Item
 	// loadFailed records that the last refresh failed, so the next good one
 	// can say the board is current again.
 	loadFailed bool
-	col    int // focused column
+	col        int // focused column
 	// sel is the selected item's ID — the source of truth for the selection.
 	// Items arrive ordered by updated_at, so any session finishing a turn
 	// reorders its column; an index cursor then silently points at a
 	// different session, and J/R act on the wrong one. row is only the last
 	// position sel resolved to, kept for rendering and as the fallback when
 	// sel leaves the column.
-	sel    string
-	row    int
+	sel string
+	row int
+	// scroll is the first visible item per column. It is kept across frames
+	// so moving the cursor up from the bottom of a long column scrolls one
+	// card at a time instead of snapping back to the top.
+	scroll []int
 	w, h   int
 	detail bool   // detail pane open for the selected item
 	group  bool   // group items by JIRA ticket
@@ -92,7 +96,7 @@ type Model struct {
 	// statusSeq numbers every status set, so an expiry timer armed for an
 	// older message cannot clear a newer one.
 	statusSeq int
-	pulls  []store.Pull
+	pulls     []store.Pull
 	// polling guards against stacking gh calls when one runs long: the timer
 	// keeps firing regardless of how slow the network is.
 	polling bool
@@ -243,6 +247,18 @@ func (m *Model) setRow(row int) {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	nm, ok := next.(Model)
+	if !ok {
+		return next, cmd
+	}
+	// Any message can move the cursor or change what a column holds, so the
+	// scroll offsets are re-fitted once here rather than at every call site.
+	nm.syncScroll()
+	return nm, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height

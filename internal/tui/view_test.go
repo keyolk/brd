@@ -730,3 +730,65 @@ func TestFailedLoadKeepsTheLastGoodBoard(t *testing.T) {
 		t.Errorf("partial load: %d items, %d pulls; want 2 and the old 1", len(m.items), len(m.pulls))
 	}
 }
+
+// A column longer than the screen scrolls to keep the cursor visible and
+// says how many items are above and below, instead of silently stopping.
+func TestOverflowingColumnScrollsToTheCursor(t *testing.T) {
+	var items []store.Item
+	for i := 0; i < 10; i++ {
+		id := string(rune('a' + i))
+		items = append(items, item("s"+id, "/src/"+id, "card-"+id, store.StateWaiting, "idle_prompt"))
+	}
+	m := board(140, 12, items...)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 12})
+	m = next.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "card-a") || !strings.Contains(out, "↓ 6 more") {
+		t.Fatalf("top of column should show card-a and ↓ 6 more:\n%s", out)
+	}
+
+	// k wraps to the last card, which must now be on screen.
+	next, _ = m.Update(keyMsg("k"))
+	m = next.(Model)
+	out = m.View()
+	if !strings.Contains(out, "card-j") {
+		t.Fatalf("cursor on card-j but it is not visible:\n%s", out)
+	}
+	if strings.Contains(out, "card-a") || !strings.Contains(out, "↑ ") {
+		t.Errorf("scrolled view should hide card-a and show ↑ N more:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got > 12 {
+		t.Errorf("view is %d lines, taller than the 12-line terminal", got)
+	}
+
+	// Walking back up scrolls one card at a time: the card just above the
+	// window comes into view without snapping to the top.
+	start := m.scrollOf(0)
+	next, _ = m.Update(keyMsg("k"))
+	m = next.(Model)
+	for i := 0; i < 10 && m.row >= start; i++ {
+		next, _ = m.Update(keyMsg("k"))
+		m = next.(Model)
+	}
+	if m.scrollOf(0) != m.row {
+		t.Errorf("scroll = %d after moving above the window to row %d", m.scrollOf(0), m.row)
+	}
+}
+
+// A detail pane longer than the body says how much it cut.
+func TestDetailSaysWhatItCut(t *testing.T) {
+	var kids []store.Child
+	for i := 0; i < 30; i++ {
+		kids = append(kids, store.Child{Kind: "bash", Label: "job", State: "running"})
+	}
+	m := board(140, 15, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt", kids...))
+	m.detail = true
+	out := m.View()
+	if !strings.Contains(out, "more lines") {
+		t.Errorf("long detail cut without saying so:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got > 15 {
+		t.Errorf("view is %d lines, taller than the 15-line terminal", got)
+	}
+}
