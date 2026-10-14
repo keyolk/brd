@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/brd/internal/transcript"
+	"github.com/keyolk/tuikit/tmux"
 )
 
 // Liveness is what tmux knows about a session right now.
@@ -32,51 +34,65 @@ type Liveness struct {
 	State string    // working | waiting | done — cc_state's own vocabulary
 	Since time.Time // when that state was entered
 	Pane  string
+	// Cwd is the pane's current path, read in the same list-panes call, so a
+	// session brd has never recorded can be labelled by repository without a
+	// second tmux round trip per pane.
+	Cwd string
 }
 
-// liveSessions reads the state of every Claude session tmux is holding.
+// The pane options the user's cc_state hook publishes on every turn.
+const (
+	optSession = "@cc_pane_session"
+	optState   = "@cc_pane_state"
+	optSince   = "@cc_pane_since"
+)
+
+// LiveSessions reads the state of every Claude session tmux is holding.
 //
 // A nil result means "tmux told us nothing" — not running under tmux, or the
 // server is gone. That is deliberately different from an empty map, which
 // would mean "tmux says no sessions are live"; treating the two alike would
 // mark every item dead the moment brd ran outside tmux.
-func LiveSessions() map[string]Liveness { return liveSessions() }
+func LiveSessions() map[string]Liveness {
+	live, _ := liveSessions(context.Background(), tmux.New(nil))
+	return live
+}
 
 // ApplyLiveness reconciles items against tmux. Exported so `brd ls` gets the
 // same answer the TUI does — a text board that disagreed with the interactive
 // one about what is running would be worse than no text board.
 func ApplyLiveness(items []store.Item) []store.Item {
-	return applyLiveness(items, liveSessions())
+	return applyLiveness(items, LiveSessions())
 }
 
-func liveSessions() map[string]Liveness {
-	if os.Getenv("TMUX") == "" {
-		return nil
-	}
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{pane_id}\t#{@cc_pane_session}\t#{@cc_pane_state}\t#{@cc_pane_since}").Output()
+// liveSessions lists every pane with the cc_state options and keys the result
+// by session ID. It keeps tmux.Client.Panes' contract: a failed call (outside
+// tmux, server gone) is a nil map and the error; a server that answered with
+// no Claude panes is an empty, non-nil map.
+func liveSessions(ctx context.Context, tm tmux.Client) (map[string]Liveness, error) {
+	panes, err := tm.Panes(ctx, tmux.PaneFilter{Options: []string{optSession, optState, optSince}})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	live := map[string]Liveness{}
-	for _, line := range strings.Split(string(out), "\n") {
-		parts := strings.Split(line, "\t")
-		if len(parts) < 4 || parts[1] == "" {
+	for _, p := range panes {
+		sess := p.Options[optSession]
+		if sess == "" {
 			continue
 		}
-		l := Liveness{State: parts[2], Pane: parts[0]}
-		if secs, err := strconv.ParseInt(parts[3], 10, 64); err == nil && secs > 0 {
+		l := Liveness{State: p.Options[optState], Pane: p.ID, Cwd: p.Cwd}
+		if secs, err := strconv.ParseInt(p.Options[optSince], 10, 64); err == nil && secs > 0 {
 			l.Since = time.Unix(secs, 0)
 		}
 		// A pane can outlive the session that set these options, and a session
 		// can move between panes. The most recent stamp wins, matching what
 		// cc_state itself does when it releases stale windows.
-		if prev, ok := live[parts[1]]; ok && prev.Since.After(l.Since) {
+		if prev, ok := live[sess]; ok && prev.Since.After(l.Since) {
 			continue
 		}
-		live[parts[1]] = l
+		live[sess] = l
 	}
-	return live
+	return live, nil
 }
 
 // applyLiveness reconciles the board against tmux.
@@ -139,7 +155,7 @@ func applyLiveness(items []store.Item, live map[string]Liveness) []store.Item {
 		if l.State == "working" {
 			state = store.StateWorking
 		}
-		cwd := paneCwd(l.Pane)
+		cwd := l.Cwd
 		it := store.Item{
 			ID: id, State: state, Live: true,
 			StateSince: l.Since, UpdatedAt: l.Since,
@@ -156,25 +172,6 @@ func applyLiveness(items []store.Item, live map[string]Liveness) []store.Item {
 		out = append(out, it)
 	}
 	return out
-}
-
-// paneCwd asks tmux where a pane is, so a session brd has never recorded can
-// still be labelled by repository.
-//
-// Without it such an item shows a bare id and nothing else. The pane's cwd is
-// not perfect — the shell may have moved since — but it is what the board has,
-// and it is right for the overwhelmingly common case of a pane that stayed
-// where it started.
-func paneCwd(pane string) string {
-	if pane == "" {
-		return ""
-	}
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", pane,
-		"#{pane_current_path}").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }
 
 // laterOf prefers whichever timestamp is more recent and non-zero. tmux's

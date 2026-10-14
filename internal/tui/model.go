@@ -8,6 +8,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/keyolk/tuikit/keys"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/theme"
+	"github.com/keyolk/tuikit/tmux"
 	"github.com/keyolk/tuikit/toast"
 )
 
@@ -103,6 +105,11 @@ type Model struct {
 	// keeps firing regardless of how slow the network is.
 	polling bool
 
+	// tm reads pane liveness and performs jumps. The zero Client fails every
+	// call without running anything, so a test model can never reach the
+	// developer's real tmux server.
+	tm tmux.Client
+
 	km      keys.Keymap // zero means the defaults; see keymap()
 	help    bool        // help overlay open
 	helpOff int         // help scroll offset, clamped by keys.RenderHelp
@@ -121,7 +128,7 @@ type Model struct {
 // the last run left behind. Neither failing stops the board: the defaults are
 // used and an error toast says what was ignored.
 func New(db *store.DB) Model {
-	m := Model{db: db, th: newTheme(), saver: prefs.NewSaver[uiState](appName, 0)}
+	m := Model{db: db, th: newTheme(), saver: prefs.NewSaver[uiState](appName, 0), tm: tmux.New(nil)}
 	km, err := baseKeymap.LoadOverrides(keys.ConfigPath(appName), stacks...)
 	m.km = km
 	if err != nil {
@@ -144,6 +151,7 @@ func tick() tea.Cmd {
 }
 
 func (m Model) load() tea.Cmd {
+	tm := m.tm
 	return func() tea.Msg {
 		items, err := m.db.Items(window)
 		if err != nil {
@@ -152,7 +160,11 @@ func (m Model) load() tea.Cmd {
 		// tmux is asked on every refresh, not cached: it is the only thing
 		// that knows whether a session still exists, and at 7ms for every
 		// pane it is cheaper than the database read it accompanies.
-		items = applyLiveness(items, liveSessions())
+		// A failed read is a nil map, which applyLiveness treats as "no
+		// signal" rather than "nothing is live"; the error itself adds
+		// nothing the board could act on every two seconds.
+		live, _ := liveSessions(context.Background(), tm)
+		items = applyLiveness(items, live)
 		prs, err := m.db.Pulls()
 		return loadedMsg{items: items, pulls: prs, pullsErr: err}
 	}
@@ -448,12 +460,12 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 
 	case actJump:
 		// Capital J (or g), so it cannot be hit while navigating with j.
-		// No liveness pre-check here: paneFor shells out to tmux, and Update
+		// No liveness pre-check here: paneFor calls tmux, and Update
 		// must not block on a subprocess (a wedged tmux server would freeze
 		// the board). jump() does the same lookup off the UI goroutine and
 		// reports a missing pane through jumpMsg.
 		if it, ok := m.selected(); ok {
-			return m, jump(it.ID)
+			return m, jump(m.tm, it.ID)
 		}
 
 	case actResume:
