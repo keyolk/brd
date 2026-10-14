@@ -32,22 +32,13 @@ var (
 const minColWidth = 22
 
 func (m Model) View() string {
-	if m.err != nil {
-		return "\n  " + lipgloss.NewStyle().Foreground(blockedFg).Render(
-			"board unavailable: "+m.err.Error()) + "\n\n  r retry · q quit\n"
-	}
 	if m.w == 0 {
 		return "" // pre-first-WindowSizeMsg; drawing now would flash a wrong layout
 	}
 
 	header := m.renderHeader()
 	hints := m.renderHints()
-	// Reserve exactly what the chrome uses so the columns never overflow into
-	// the hint bar and push it off screen.
-	bodyH := m.h - lipgloss.Height(header) - lipgloss.Height(hints)
-	if bodyH < 3 {
-		bodyH = 3
-	}
+	bodyH := m.bodyHeight()
 
 	var body string
 	if m.detail {
@@ -102,7 +93,13 @@ func (m Model) renderHints() string {
 	// A message from the last action outranks the key list: it is the answer
 	// to a keystroke the user just pressed, and it is transient.
 	if m.status != "" {
-		return lipgloss.NewStyle().Foreground(blockedFg).
+		// Red is reserved for failures; an informational message in the
+		// same color reads as something having gone wrong.
+		fg := accentFg
+		if m.statusLvl == statusError {
+			fg = blockedFg
+		}
+		return lipgloss.NewStyle().Foreground(fg).
 			Render(truncate(m.status, m.w))
 	}
 
@@ -158,6 +155,167 @@ func (m Model) renderColumns(height int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, joined...)
 }
 
+// bodyHeight is the terminal height minus the one-line header and the
+// one-line hint bar (both are truncated to a single line), so the columns
+// never overflow into the hint bar and push it off screen.
+func (m Model) bodyHeight() int {
+	return max(3, m.h-2)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// cardBlocks renders each item of column idx as one block of lines, a group
+// header attached to the first item of its run. Scrolling works in whole
+// blocks so a card is never cut in half at the top of a column.
+func (m Model) cardBlocks(idx, w int, focused bool) [][]string {
+	in := m.inColumn(idx)
+	blocks := make([][]string, 0, len(in))
+	lastGroup := ""
+	for i, it := range in {
+		var lines []string
+		// A group header, printed once per run of items sharing a key. Items
+		// with nothing to group by get no header — one above every single row
+		// would cost more space than it explains.
+		if m.group {
+			if key := it.GroupKey(); key != lastGroup {
+				lastGroup = key
+				if label := it.GroupLabel(); label != "" {
+					lines = append(lines, headStyle.Render(truncate(groupHeader(it), w)))
+				}
+			}
+		}
+		lines = append(lines, m.renderCard(it, i == m.row && focused, w)...)
+		blocks = append(blocks, lines)
+	}
+	return blocks
+}
+
+func blockHeights(blocks [][]string) []int {
+	hs := make([]int, len(blocks))
+	for i, b := range blocks {
+		hs[i] = len(b)
+	}
+	return hs
+}
+
+// fitScroll returns the visible block range [start, end) for a column of
+// blocks with the given heights in avail lines, starting from the stored
+// offset and moving it only as far as needed to keep block cur visible
+// (cur < 0 means no cursor in this column). One line is spent on "↑ N more"
+// when start > 0 and one on "↓ N more" when end < len(heights).
+func fitScroll(heights []int, off, cur, avail int) (start, end int) {
+	n := len(heights)
+	if n == 0 {
+		return 0, 0
+	}
+	off = clampRow(max(off, 0), n)
+	if cur >= 0 && cur < off {
+		off = cur
+	}
+	for {
+		end = visibleEnd(heights, off, avail)
+		if cur < end || off >= cur {
+			break
+		}
+		off++
+	}
+	// Pull back while the tail is fully shown, so a column that shrank does
+	// not leave blank space below while items above it stay hidden.
+	for off > 0 && end == n {
+		e := visibleEnd(heights, off-1, avail)
+		if e != n {
+			break
+		}
+		off--
+	}
+	return off, end
+}
+
+func visibleEnd(heights []int, off, avail int) int {
+	fill := func(space int) int {
+		used, i := 0, off
+		for i < len(heights) && used+heights[i] <= space {
+			used += heights[i]
+			i++
+		}
+		return i
+	}
+	space := avail
+	if off > 0 {
+		space-- // "↑ N more"
+	}
+	end := fill(space)
+	if end < len(heights) {
+		end = fill(space - 1) // "↓ N more"
+	}
+	if end <= off {
+		end = off + 1 // a card taller than the column still shows, cut
+	}
+	return end
+}
+
+// scrolledLines lays out blocks[start:end] in avail lines with honest
+// overflow markers: the user is told how many items sit above and below.
+func scrolledLines(blocks [][]string, start, end, avail, w int) []string {
+	var lines []string
+	if start > 0 {
+		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↑ %d more", start), w)))
+	}
+	for _, b := range blocks[start:end] {
+		lines = append(lines, b...)
+	}
+	more := len(blocks) - end
+	if more > 0 {
+		room := avail - 1
+		if len(lines) > room {
+			lines = lines[:max(room, 0)]
+		}
+		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↓ %d more", more), w)))
+	}
+	if len(lines) > avail {
+		lines = lines[:avail]
+	}
+	return lines
+}
+
+// scrollOf is the stored offset for column i.
+func (m Model) scrollOf(i int) int {
+	if i < 0 || i >= len(m.scroll) {
+		return 0
+	}
+	return m.scroll[i]
+}
+
+// columnWindow is the visible range of column idx for the current layout.
+func (m Model) columnWindow(idx, avail int) (start, end int) {
+	cur := -1
+	if idx == m.col {
+		cur = m.row
+	}
+	// Card height does not depend on width, so any width gives the same
+	// heights; the cursor highlight does not change them either.
+	return fitScroll(blockHeights(m.cardBlocks(idx, minColWidth, false)), m.scrollOf(idx), cur, avail)
+}
+
+// syncScroll stores each column's fitted offset. View re-fits on its own, so
+// this only makes the offset persist between frames.
+func (m *Model) syncScroll() {
+	if m.h == 0 {
+		return
+	}
+	avail := m.bodyHeight() - 1 // title line
+	next := make([]int, len(Columns))
+	for i := range Columns {
+		next[i], _ = m.columnWindow(i, avail)
+	}
+	m.scroll = next
+}
+
 func (m Model) renderColumn(idx int, col Column, w, height int) string {
 	in := m.inColumn(idx)
 	focused := idx == m.col
@@ -175,25 +333,8 @@ func (m Model) renderColumn(idx int, col Column, w, height int) string {
 	if len(in) == 0 {
 		lines = append(lines, dim.Render(truncate(col.Hint, w)))
 	}
-	lastGroup := ""
-	for i, it := range in {
-		// A group header, printed once per run of items sharing a key. Items
-		// with nothing to group by get no header — one above every single row
-		// would cost more space than it explains.
-		if m.group {
-			if key := it.GroupKey(); key != lastGroup {
-				lastGroup = key
-				if label := it.GroupLabel(); label != "" {
-					lines = append(lines, headStyle.Render(
-						truncate(groupHeader(it), w)))
-				}
-			}
-		}
-		lines = append(lines, m.renderCard(it, i == m.row && focused, w)...)
-		if len(lines) >= height {
-			break
-		}
-	}
+	start, end := m.columnWindow(idx, height-1)
+	lines = append(lines, scrolledLines(m.cardBlocks(idx, w, focused), start, end, height-1, w)...)
 	// Pad so JoinHorizontal aligns every column's separator to full height.
 	for len(lines) < height {
 		lines = append(lines, "")
@@ -337,12 +478,8 @@ func (m Model) renderSingle(height int) string {
 	if len(in) == 0 {
 		lines = append(lines, dim.Render(col.Hint))
 	}
-	for i, it := range in {
-		lines = append(lines, m.renderCard(it, i == m.row, m.w)...)
-		if len(lines) >= height {
-			break
-		}
-	}
+	start, end := m.columnWindow(m.col, height-1)
+	lines = append(lines, scrolledLines(m.cardBlocks(m.col, m.w, true), start, end, height-1, m.w)...)
 	return lipgloss.NewStyle().MaxHeight(height).Render(strings.Join(lines, "\n"))
 }
 
@@ -414,7 +551,16 @@ func (m Model) renderDetail(height int) string {
 		b.WriteString("\n" + headStyle.Render("last message") + "\n")
 		b.WriteString("  " + truncate(it.LastMessage, m.w-2) + "\n")
 	}
-	return lipgloss.NewStyle().MaxHeight(height).Render(b.String())
+	// Every line above is truncated to the width, so one string line is one
+	// screen line. Cutting with MaxHeight alone dropped the tail of a long
+	// child or PR list without saying anything was missing.
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) > height {
+		hidden := len(lines) - (height - 1)
+		lines = append(lines[:height-1], dim.Render(
+			truncate(fmt.Sprintf("↓ %d more lines", hidden), m.w)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func firstNonEmpty(vals ...string) string {

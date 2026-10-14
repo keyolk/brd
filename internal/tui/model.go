@@ -50,7 +50,9 @@ type tickMsg time.Time
 type loadedMsg struct {
 	items []store.Item
 	pulls []store.Pull
-	err   error
+	err   error // items could not be read; nothing in this message is usable
+	// pullsErr means the items are fresh but the PR table was not readable.
+	pullsErr error
 }
 
 // pollMsg carries the outcome of one PR poll.
@@ -66,16 +68,35 @@ const pollInterval = 60 * time.Second
 
 // Model is the board.
 type Model struct {
-	db     *store.DB
-	items  []store.Item
-	err    error
-	col    int // focused column
-	row    int // cursor within the focused column
+	db    *store.DB
+	items []store.Item
+	// loadFailed records that the last refresh failed, so the next good one
+	// can say the board is current again.
+	loadFailed bool
+	col        int // focused column
+	// sel is the selected item's ID — the source of truth for the selection.
+	// Items arrive ordered by updated_at, so any session finishing a turn
+	// reorders its column; an index cursor then silently points at a
+	// different session, and J/R act on the wrong one. row is only the last
+	// position sel resolved to, kept for rendering and as the fallback when
+	// sel leaves the column.
+	sel string
+	row int
+	// scroll is the first visible item per column. It is kept across frames
+	// so moving the cursor up from the bottom of a long column scrolls one
+	// card at a time instead of snapping back to the top.
+	scroll []int
 	w, h   int
 	detail bool   // detail pane open for the selected item
 	group  bool   // group items by JIRA ticket
 	status string // transient feedback for an action that had nothing to say
-	pulls  []store.Pull
+	// statusLvl decides how the status looks and how long it lives: info
+	// expires on a timer, error stays until the next keystroke.
+	statusLvl statusLevel
+	// statusSeq numbers every status set, so an expiry timer armed for an
+	// older message cannot clear a newer one.
+	statusSeq int
+	pulls     []store.Pull
 	// polling guards against stacking gh calls when one runs long: the timer
 	// keeps firing regardless of how slow the network is.
 	polling bool
@@ -103,7 +124,7 @@ func (m Model) load() tea.Cmd {
 		// pane it is cheaper than the database read it accompanies.
 		items = applyLiveness(items, liveSessions())
 		prs, err := m.db.Pulls()
-		return loadedMsg{items: items, pulls: prs, err: err}
+		return loadedMsg{items: items, pulls: prs, pullsErr: err}
 	}
 }
 
@@ -120,6 +141,34 @@ func pollTick() tea.Cmd {
 }
 
 type pollTimerMsg struct{}
+
+type statusLevel int
+
+const (
+	statusInfo statusLevel = iota
+	statusError
+)
+
+// statusTTL is how long an info message stays before the hint bar returns.
+// Long enough to read a short sentence, short enough that the keys are back
+// before the user goes looking for them.
+const statusTTL = 4 * time.Second
+
+// statusExpiredMsg clears an info status, if it is still the one with seq.
+type statusExpiredMsg struct{ seq int }
+
+// setStatus shows text at the given level. Info returns the command that
+// expires it; error returns nil because it is cleared by the next key —
+// a failure should not vanish before the user has seen it.
+func (m *Model) setStatus(lvl statusLevel, text string) tea.Cmd {
+	m.statusSeq++
+	m.status, m.statusLvl = text, lvl
+	if lvl != statusInfo {
+		return nil
+	}
+	seq := m.statusSeq
+	return tea.Tick(statusTTL, func(time.Time) tea.Msg { return statusExpiredMsg{seq: seq} })
+}
 
 // inColumn returns the items in column i, in board order.
 func (m Model) inColumn(i int) []store.Item {
@@ -153,13 +202,63 @@ func (m Model) inColumn(i int) []store.Item {
 
 func (m Model) selected() (store.Item, bool) {
 	in := m.inColumn(m.col)
+	if m.sel != "" {
+		for _, it := range in {
+			if it.ID == m.sel {
+				return it, true
+			}
+		}
+		return store.Item{}, false
+	}
 	if m.row < 0 || m.row >= len(in) {
 		return store.Item{}, false
 	}
 	return in[m.row], true
 }
 
+// resolve re-derives row from sel after the focused column changed under it
+// (a refresh, a regroup). If sel is gone from the column the cursor stays at
+// the same position, clamped, and sel moves to whatever sits there now.
+func (m *Model) resolve() {
+	in := m.inColumn(m.col)
+	if m.sel != "" {
+		for i, it := range in {
+			if it.ID == m.sel {
+				m.row = i
+				return
+			}
+		}
+	}
+	m.setRow(m.row)
+}
+
+// setRow moves the cursor to a position in the focused column and records
+// the item there as the selection.
+func (m *Model) setRow(row int) {
+	in := m.inColumn(m.col)
+	m.row = clampRow(row, len(in))
+	if m.row < 0 {
+		m.row = 0
+	}
+	m.sel = ""
+	if m.row < len(in) {
+		m.sel = in[m.row].ID
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	nm, ok := next.(Model)
+	if !ok {
+		return next, cmd
+	}
+	// Any message can move the cursor or change what a column holds, so the
+	// scroll offsets are re-fitted once here rather than at every call site.
+	nm.syncScroll()
+	return nm, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -179,30 +278,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = false
 		if msg.err != nil {
 			// A PR poll failing is not a broken board — gh may simply not be
-			// logged in — so it goes to the status line, not m.err.
-			m.status = msg.err.Error()
+			// logged in — so it goes to the status line.
+			m.setStatus(statusError, "PR poll: "+msg.err.Error())
 		}
 		return m, m.load()
 
-	case loadedMsg:
-		m.items, m.pulls, m.err = msg.items, msg.pulls, msg.err
-		// The cursor is an index into a list that just changed under it. A
-		// session moving from Working to Blocked shortens the column it left,
-		// and leaving the row where it was would select a different item —
-		// or nothing — without the user having touched a key.
-		if n := len(m.inColumn(m.col)); m.row >= n {
-			m.row = max(0, n-1)
+	case statusExpiredMsg:
+		if msg.seq == m.statusSeq && m.statusLvl == statusInfo {
+			m.status = ""
 		}
+		return m, nil
+
+	case loadedMsg:
+		// A failed read keeps the last good board and says so in the status
+		// line. Blanking the board for a transient error (a locked database
+		// mid-write) flashed an error screen for one tick and threw away
+		// everything the user was looking at, cursor included.
+		if msg.err != nil {
+			m.loadFailed = true
+			m.setStatus(statusError, "refresh failed, showing last good board: "+msg.err.Error())
+			return m, nil
+		}
+		var cmd tea.Cmd
+		if m.loadFailed {
+			m.loadFailed = false
+			cmd = m.setStatus(statusInfo, "board refreshed")
+		}
+		m.items = msg.items
+		if msg.pullsErr != nil {
+			m.setStatus(statusError, "reading PRs: "+msg.pullsErr.Error())
+		} else {
+			m.pulls = msg.pulls
+		}
+		// Follow the selected item by ID, not position: a refresh reorders
+		// columns by recency, so the same index can name a different session.
+		m.resolve()
 		// A detail pane whose item left the column has nothing to show, and
 		// an open pane reading "nothing selected" is worse than no pane.
 		if _, ok := m.selected(); !ok {
 			m.detail = false
 		}
-		return m, nil
+		return m, cmd
 
 	case jumpMsg:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(statusError, msg.err.Error())
 		}
 		return m, m.load()
 
@@ -219,33 +339,49 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// no text entry, so no key is ever meant as a literal character.
 	msg = normalizeCJKKey(msg)
 
+	// An error has been on screen since it arrived; any keystroke means the
+	// user has seen it, so the hint bar comes back. The key still acts.
+	if m.status != "" && m.statusLvl == statusError {
+		m.status = ""
+	}
+
 	switch msg.String() {
-	case "q", "ctrl+c", "esc":
+	case "q", "ctrl+c":
 		if m.detail {
 			m.detail = false
 			return m, nil
 		}
 		return m, tea.Quit
 
+	case "esc":
+		// esc only closes. It is the key people press to back out of
+		// something, and on the bare board that used to quit the app — one
+		// reflexive keystroke too many lost the board entirely.
+		m.detail = false
+		return m, nil
+
 	case "j", "down":
+		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
-			m.row = (m.row + 1) % n
+			m.setRow((m.row + 1) % n)
 		}
 	case "k", "up":
+		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
-			m.row = (m.row - 1 + n) % n
+			m.setRow((m.row - 1 + n) % n)
 		}
 	case "h", "left":
 		m.col = (m.col - 1 + len(Columns)) % len(Columns)
-		m.row = clampRow(m.row, len(m.inColumn(m.col)))
+		m.setRow(m.row)
 	case "l", "right":
 		m.col = (m.col + 1) % len(Columns)
-		m.row = clampRow(m.row, len(m.inColumn(m.col)))
+		m.setRow(m.row)
 
 	case "b":
 		// Jump to the first blocked item — the one keystroke that answers
 		// "who is waiting on me" without navigating there.
-		m.col, m.row, m.detail = 0, 0, false
+		m.col, m.detail = 0, false
+		m.setRow(0)
 
 	case "enter", " ":
 		if _, ok := m.selected(); ok {
@@ -256,16 +392,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Group by ticket. Off by default: it only helps once several
 		// sessions share one, and a board of ungrouped items reads worse
 		// with a header above every single row.
+		// The selection survives the reorder: it is the same item, just at a
+		// new position.
 		m.group = !m.group
-		m.row = 0
+		m.resolve()
 
 	case "J":
 		// Capital J, so it cannot be hit while navigating with j.
+		// No liveness pre-check here: paneFor shells out to tmux, and Update
+		// must not block on a subprocess (a wedged tmux server would freeze
+		// the board). jump() does the same lookup off the UI goroutine and
+		// reports a missing pane through jumpMsg.
 		if it, ok := m.selected(); ok {
-			if _, live := paneFor(it.ID); !live {
-				m.status = "no live tmux pane — R resumes it instead"
-				return m, nil
-			}
 			m.status = ""
 			return m, jump(it.ID)
 		}
@@ -290,13 +428,6 @@ func clampRow(row, n int) int {
 		return n - 1
 	}
 	return row
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // ShortAge renders a duration in the least space that stays unambiguous.
@@ -414,10 +545,12 @@ func (m Model) sharedGroups() bool {
 	for i := range Columns {
 		seen := map[string]bool{}
 		for _, it := range m.inColumn(i) {
-			key := it.GroupKey()
-			if key == "3" {
+			// Ask the item whether it has a group rather than matching the
+			// sort-key prefix GroupKey happens to use for "none".
+			if it.GroupLabel() == "" {
 				continue // nothing to group by
 			}
+			key := it.GroupKey()
 			if seen[key] {
 				return true
 			}

@@ -591,3 +591,204 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// J must not shell out to tmux inside Update. With TMUX unset paneFor fails
+// fast, so the only way the status could be set synchronously is a pre-check;
+// the handler must instead hand back jump()'s command and leave the verdict to
+// jumpMsg.
+func TestJumpDoesNotCheckThePaneInsideUpdate(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	next, cmd := m.handleKey(keyMsg("J"))
+	if got := next.(Model).status; got != "" {
+		t.Errorf("status set synchronously by J: %q", got)
+	}
+	if cmd == nil {
+		t.Fatal("J returned no command")
+	}
+	msg, ok := cmd().(jumpMsg)
+	if !ok || msg.err == nil || !strings.Contains(msg.err.Error(), "R resumes it instead") {
+		t.Errorf("jump() result = %#v, want an error pointing at R", msg)
+	}
+}
+
+// Items arrive ordered by updated_at, so a refresh reorders a column whenever
+// another session finishes a turn. The selection must follow the item, not
+// the index, or J/R act on a session the user never picked.
+func TestSelectionFollowsTheItemAcrossReorders(t *testing.T) {
+	a := item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt")
+	b := item("s2", "/src/b", "b", store.StateWaiting, "idle_prompt")
+	m := board(140, 20, a, b)
+	next, _ := m.handleKey(keyMsg("j"))
+	m = next.(Model)
+	m.detail = true
+	if sel, _ := m.selected(); sel.ID != "s2" {
+		t.Fatalf("j selected %q, want s2", sel.ID)
+	}
+
+	// b gets touched and jumps ahead of a: same two items, opposite order.
+	next, _ = m.Update(loadedMsg{items: []store.Item{b, a}})
+	m = next.(Model)
+	sel, ok := m.selected()
+	if !ok || sel.ID != "s2" {
+		t.Fatalf("after reorder selected %q (ok=%v), want s2", sel.ID, ok)
+	}
+	if m.row != 0 {
+		t.Errorf("row = %d, want 0 (where s2 now sits)", m.row)
+	}
+	if !m.detail {
+		t.Error("detail pane closed although its item is still in the column")
+	}
+	if out := m.View(); !strings.Contains(out, "s2") {
+		t.Errorf("detail pane is not showing s2:\n%s", out)
+	}
+}
+
+// An info message expires on its own; a timer armed for an older message must
+// not clear a newer one.
+func TestInfoStatusExpiresAndIsSeqGuarded(t *testing.T) {
+	m := board(140, 20)
+	if cmd := m.setStatus(statusInfo, "first"); cmd == nil {
+		t.Fatal("info status armed no expiry")
+	}
+	stale := m.statusSeq
+	m.setStatus(statusInfo, "second")
+
+	next, _ := m.Update(statusExpiredMsg{seq: stale})
+	m = next.(Model)
+	if m.status != "second" {
+		t.Fatalf("stale expiry cleared the newer message: %q", m.status)
+	}
+	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
+	if got := next.(Model).status; got != "" {
+		t.Errorf("info status survived its expiry: %q", got)
+	}
+}
+
+// An error stays until the user presses a key — a poll failing every minute
+// used to cover the hint bar for good, because nothing ever cleared it.
+func TestErrorStatusPersistsUntilTheNextKey(t *testing.T) {
+	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	next, _ := m.Update(pollMsg{err: errString("gh: not logged in")})
+	m = next.(Model)
+	if m.statusLvl != statusError || !strings.Contains(m.status, "not logged in") {
+		t.Fatalf("poll failure not shown as an error: %q (lvl %d)", m.status, m.statusLvl)
+	}
+	if cmd := m.setStatus(statusError, m.status); cmd != nil {
+		t.Error("error status armed an expiry timer")
+	}
+	next, _ = m.Update(statusExpiredMsg{seq: m.statusSeq})
+	m = next.(Model)
+	if m.status == "" {
+		t.Fatal("error status expired on a timer")
+	}
+	next, _ = m.handleKey(keyMsg("j"))
+	if got := next.(Model).status; got != "" {
+		t.Errorf("error status survived a keystroke: %q", got)
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+// A failed refresh keeps the last good board and reports the failure in the
+// status line; it used to nil the items and swap in a full-screen error.
+func TestFailedLoadKeepsTheLastGoodBoard(t *testing.T) {
+	a := item("s1", "/src/a", "alpha", store.StateWaiting, "idle_prompt")
+	m := board(140, 20, a)
+	m.pulls = []store.Pull{{Number: 7, State: "OPEN"}}
+	m.setRow(0)
+
+	next, _ := m.Update(loadedMsg{err: errString("database is locked")})
+	m = next.(Model)
+	if len(m.items) != 1 || len(m.pulls) != 1 {
+		t.Fatalf("failed load dropped data: %d items, %d pulls", len(m.items), len(m.pulls))
+	}
+	if sel, ok := m.selected(); !ok || sel.ID != "s1" {
+		t.Errorf("failed load lost the selection")
+	}
+	if m.statusLvl != statusError || !strings.Contains(m.status, "database is locked") {
+		t.Errorf("failure not reported as an error status: %q", m.status)
+	}
+	if out := m.View(); !strings.Contains(out, "alpha") {
+		t.Errorf("board not rendered after a failed load:\n%s", out)
+	}
+
+	// The next good load says the board is current again, as info.
+	next, cmd := m.Update(loadedMsg{items: []store.Item{a}, pulls: m.pulls})
+	m = next.(Model)
+	if m.statusLvl != statusInfo || cmd == nil {
+		t.Errorf("recovery not announced as expiring info: %q (lvl %d)", m.status, m.statusLvl)
+	}
+
+	// Items fresh but PR table unreadable: take the items, keep the PRs.
+	b := item("s2", "/src/b", "beta", store.StateWaiting, "idle_prompt")
+	next, _ = m.Update(loadedMsg{items: []store.Item{a, b}, pullsErr: errString("no such table")})
+	m = next.(Model)
+	if len(m.items) != 2 || len(m.pulls) != 1 {
+		t.Errorf("partial load: %d items, %d pulls; want 2 and the old 1", len(m.items), len(m.pulls))
+	}
+}
+
+// A column longer than the screen scrolls to keep the cursor visible and
+// says how many items are above and below, instead of silently stopping.
+func TestOverflowingColumnScrollsToTheCursor(t *testing.T) {
+	var items []store.Item
+	for i := 0; i < 10; i++ {
+		id := string(rune('a' + i))
+		items = append(items, item("s"+id, "/src/"+id, "card-"+id, store.StateWaiting, "idle_prompt"))
+	}
+	m := board(140, 12, items...)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 12})
+	m = next.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "card-a") || !strings.Contains(out, "↓ 6 more") {
+		t.Fatalf("top of column should show card-a and ↓ 6 more:\n%s", out)
+	}
+
+	// k wraps to the last card, which must now be on screen.
+	next, _ = m.Update(keyMsg("k"))
+	m = next.(Model)
+	out = m.View()
+	if !strings.Contains(out, "card-j") {
+		t.Fatalf("cursor on card-j but it is not visible:\n%s", out)
+	}
+	if strings.Contains(out, "card-a") || !strings.Contains(out, "↑ ") {
+		t.Errorf("scrolled view should hide card-a and show ↑ N more:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got > 12 {
+		t.Errorf("view is %d lines, taller than the 12-line terminal", got)
+	}
+
+	// Walking back up scrolls one card at a time: the card just above the
+	// window comes into view without snapping to the top.
+	start := m.scrollOf(0)
+	next, _ = m.Update(keyMsg("k"))
+	m = next.(Model)
+	for i := 0; i < 10 && m.row >= start; i++ {
+		next, _ = m.Update(keyMsg("k"))
+		m = next.(Model)
+	}
+	if m.scrollOf(0) != m.row {
+		t.Errorf("scroll = %d after moving above the window to row %d", m.scrollOf(0), m.row)
+	}
+}
+
+// A detail pane longer than the body says how much it cut.
+func TestDetailSaysWhatItCut(t *testing.T) {
+	var kids []store.Child
+	for i := 0; i < 30; i++ {
+		kids = append(kids, store.Child{Kind: "bash", Label: "job", State: "running"})
+	}
+	m := board(140, 15, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt", kids...))
+	m.detail = true
+	out := m.View()
+	if !strings.Contains(out, "more lines") {
+		t.Errorf("long detail cut without saying so:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got > 15 {
+		t.Errorf("view is %d lines, taller than the 15-line terminal", got)
+	}
+}
