@@ -219,7 +219,9 @@ the next key.
 
 One binding table drives the keys, the hint bar and `?` help. Rebind any
 action in `~/.config/brd/keys.yaml` (`$XDG_CONFIG_HOME/brd/keys.yaml`) by its
-name; an unknown name is reported and the defaults stay:
+name (or `context.action` to rebind it in one context only); an unknown name,
+a key bound twice, or a key that would hide `quit`/`help` is reported and the
+defaults stay:
 
 ```yaml
 refresh: ["ctrl+r"]
@@ -227,7 +229,7 @@ jump: ["J", "o"]
 ```
 
 Actions: `quit help refresh move.down move.up column.prev column.next
-detail.toggle detail.close blocked group.on group.off jump resume help.close
+detail.toggle detail.close blocked group jump resume help.close
 help.down help.up`.
 
 Grouping, the focused column and the selected session are kept in

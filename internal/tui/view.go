@@ -8,6 +8,7 @@ import (
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/tuikit/keys"
 	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/theme"
 	"github.com/keyolk/tuikit/toast"
 )
 
@@ -64,6 +65,18 @@ var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
 // renderHelp is the `?` overlay, derived from the binding table so it cannot
 // drift from what the keys do.
 func (m Model) renderHelp() string {
+	lines, _ := m.helpLines(m.helpOff)
+	if lines == nil {
+		return helpBox.Render("? help needs a larger terminal")
+	}
+	return helpBox.Render(strings.Join(lines, "\n"))
+}
+
+// helpLines lays the help page out at offset and returns the offset clamped
+// to the last full page. Update stores that offset, so holding j at the end
+// does not grow it past what k has to undo; View passes the stored one.
+// nil lines mean the terminal is too small for the box.
+func (m Model) helpLines(offset int) ([]string, int) {
 	sections := m.helpSections()
 	total := 0
 	for i, s := range sections {
@@ -77,9 +90,9 @@ func (m Model) renderHelp() string {
 	w := min(56, m.w-4) - 4
 	h := min(total, m.h-4-2)
 	if w < 10 || h < 1 {
-		return helpBox.Render("? help needs a larger terminal")
+		return nil, 0
 	}
-	return helpBox.Render(strings.Join(keys.RenderHelp(sections, w, h, m.helpOff), "\n"))
+	return keys.RenderHelp(sections, w, h, offset, m.th.HelpStyle())
 }
 
 // renderHeader leads with the blocked count, because that is the number the
@@ -121,27 +134,25 @@ func (m Model) renderHeader() string {
 //
 // A toast outranks the key list: it is the answer to a keystroke the user
 // just pressed, or news about the board, and it is transient. The keys come
-// from the binding table, filtered by inFooter and dropped from the
+// from the binding table, filtered by inFooter (keyOpts.Visible) and dropped from the
 // low-priority end with `…` when narrow; `? help` and `q quit` are pinned.
 func (m Model) renderHints() string {
-	if t := toast.View(m.toasts, m.w, m.toastStyles()); t != "" {
+	if t := toast.View(m.toasts, m.w, m.th.ToastStyles()); t != "" {
 		return t
 	}
-	return m.keymap().Footer(m.active(), m.w, m.inFooter, footerStyle)
+	return m.keymap().Footer(m.active(), m.w, m.keyOpts(), m.th.FooterStyle())
 }
 
-var footerStyle = keys.FooterStyle{Key: lipgloss.NewStyle(), Desc: dim, More: dim}
-
-// toastStyles keeps red for failures only; an informational message in the
-// same color reads as something having gone wrong.
-func (m Model) toastStyles() toast.Styles {
-	return toast.Styles{
-		Info:    lipgloss.NewStyle().Foreground(accentFg),
-		Success: lipgloss.NewStyle().Foreground(workingFg),
-		Warn:    lipgloss.NewStyle().Foreground(blockedFg),
-		Error:   lipgloss.NewStyle().Foreground(blockedFg).Bold(true),
-		ASCII:   m.ascii,
-	}
+// newTheme maps brd's palette onto the kit's roles, so the hint bar, toasts
+// and help share the board's colors. Red stays for failures only: an
+// informational toast in the same color reads as something having gone wrong.
+func newTheme() theme.Theme {
+	r := theme.DefaultRoles()
+	r.Muted, r.Subtle = dimFg, dimFg
+	r.Accent, r.Info, r.BorderFocus = accentFg, accentFg, accentFg
+	r.Success = workingFg
+	r.Warn, r.Error = blockedFg, blockedFg
+	return theme.NewWith(nil, r, theme.DetectGlyphs(appName))
 }
 
 func (m Model) renderColumns(height int) string {

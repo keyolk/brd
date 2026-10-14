@@ -144,27 +144,17 @@ func quitAfterSave(t *testing.T, m Model, key tea.KeyMsg) (Model, bool) {
 }
 
 // The binding table must have no key bound twice in one context, no key that
-// hides quit or help where they are promised, and no shortcut a Korean input
-// source cannot type. Each exception below is deliberate and says why.
+// hides quit or help where they are promised (unless the binding declares
+// it), and no shortcut a Korean input source cannot type.
 func TestKeymapHasNoConflicts(t *testing.T) {
-	stacks := [][]keys.Ctx{
-		{ctxBoard, ctxGlobal},
-		{ctxDetail, ctxBoard, ctxGlobal},
-		{ctxHelp, ctxGlobal},
-	}
 	for _, c := range defaultKeymap().Conflicts(stacks...) {
-		switch {
-		// t is group or ungroup, never both: canRun enables exactly one.
-		case c.Kind == keys.Duplicate && c.Key == "t" && c.Ctx == ctxBoard:
-		// q closes the detail pane before it quits; the footer then offers
-		// ctrl+c for quit, so nothing it shows is a lie.
-		case c.Kind == keys.Shadowed && c.Key == "q" && c.Ctx == ctxDetail:
 		// J keeps its old look in the hint bar; g is the alias a Korean
-		// input source can reach.
-		case c.Kind == keys.Unreachable && c.Key == "J":
-		default:
-			t.Error(c)
+		// input source can reach. The kit reports per key, not per action,
+		// so a reachable alias does not excuse it.
+		if c.Kind == keys.Unreachable && c.Key == "J" {
+			continue
 		}
+		t.Error(c)
 	}
 }
 
@@ -176,15 +166,12 @@ func TestEveryHelpEntryIsReachable(t *testing.T) {
 	for _, sec := range (Model{}).helpSections() {
 		for _, e := range sec.Entries {
 			listed[e.Action] = true
-			stack := []keys.Ctx{ctxBoard, ctxGlobal}
+			stack := stacks[0]
 			if e.Group == "Detail" {
-				stack = []keys.Ctx{ctxDetail, ctxBoard, ctxGlobal}
+				stack = stacks[1]
 			}
-			// group.on/off are enabled by state; pick the state where this
-			// one runs.
-			enabled := Model{group: e.Action == actUngroup}.canRun
 			for _, k := range e.Keys {
-				b, ok := km.Resolve(stack, keyMsg(k), enabled)
+				b, ok := km.Resolve(stack, keyMsg(k), keys.Opts{})
 				if !ok || b.Action != e.Action {
 					t.Errorf("help lists %q for %s, but it resolves to %q (ok=%v)", k, e.Action, b.Action, ok)
 				}
@@ -195,6 +182,40 @@ func TestEveryHelpEntryIsReachable(t *testing.T) {
 		if b.Ctx != ctxHelp && !listed[b.Action] {
 			t.Errorf("action %s is bound but missing from help", b.Action)
 		}
+	}
+}
+
+// t is one action whose label says which way it goes, in the hint bar and
+// in the help page alike.
+func TestGroupLabelFollowsTheBoard(t *testing.T) {
+	shared := []store.Item{
+		item("s1", "/src/a", "a", store.StateWorking, ""),
+		item("s2", "/src/a", "b", store.StateWorking, ""),
+	}
+	m := board(140, 20, shared...)
+	if h := m.renderHints(); !strings.Contains(h, "t group") {
+		t.Errorf("ungrouped footer = %q", h)
+	}
+	m = press(m, "t")
+	if !m.group {
+		t.Fatal("t did not group")
+	}
+	if h := m.renderHints(); !strings.Contains(h, "t ungroup") {
+		t.Errorf("grouped footer = %q", h)
+	}
+	var label string
+	for _, sec := range m.helpSections() {
+		for _, e := range sec.Entries {
+			if e.Action == actGroup {
+				label = e.Help
+			}
+		}
+	}
+	if label != "ungroup" {
+		t.Errorf("help labels t %q while grouped, want ungroup", label)
+	}
+	if m = press(m, "t"); m.group {
+		t.Error("t did not ungroup")
 	}
 }
 
@@ -221,17 +242,17 @@ func TestKeyOverridesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	write := func(body string) {
-		if err := os.WriteFile(KeysPath(), []byte(body), 0o600); err != nil {
+		if err := os.WriteFile(keys.ConfigPath(appName), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	write("refresh: [\"ctrl+r\"]\n")
 	m := New(nil)
-	if b, ok := m.keymap().Resolve(m.active(), tea.KeyMsg{Type: tea.KeyCtrlR}, m.canRun); !ok || b.Action != actRefresh {
+	if b, ok := m.keymap().Resolve(m.active(), tea.KeyMsg{Type: tea.KeyCtrlR}, m.keyOpts()); !ok || b.Action != actRefresh {
 		t.Errorf("ctrl+r resolved to %q (ok=%v), want refresh", b.Action, ok)
 	}
-	if _, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.canRun); ok {
+	if _, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.keyOpts()); ok {
 		t.Error("r still bound after it was overridden")
 	}
 
@@ -241,7 +262,7 @@ func TestKeyOverridesFile(t *testing.T) {
 	if len(items) != 1 || items[0].Level != toast.Error || !strings.Contains(items[0].Text, "refesh") {
 		t.Errorf("unknown action not reported as an error toast: %+v", items)
 	}
-	if b, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.canRun); !ok || b.Action != actRefresh {
+	if b, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.keyOpts()); !ok || b.Action != actRefresh {
 		t.Error("a bad override file did not fall back to the defaults")
 	}
 }

@@ -1,10 +1,6 @@
 package tui
 
 import (
-	"os"
-	"path/filepath"
-	"slices"
-
 	"github.com/keyolk/tuikit/keys"
 )
 
@@ -32,8 +28,7 @@ const (
 	actNextCol     = "column.next"
 	actDetail      = "detail.toggle"
 	actBlocked     = "blocked"
-	actGroup       = "group.on"
-	actUngroup     = "group.off"
+	actGroup       = "group"
 	actJump        = "jump"
 	actResume      = "resume"
 	actDetailClose = "detail.close"
@@ -57,19 +52,21 @@ func defaultKeymap() keys.Keymap {
 		keys.Binding{Action: actJump, Keys: []string{"J", "g"}, Ctx: ctxBoard, Group: "Act", Help: "jump", Footer: 2},
 		keys.Binding{Action: actResume, Keys: []string{"R"}, Ctx: ctxBoard, Group: "Act", Help: "resume", Footer: 3},
 		keys.Binding{Action: actBlocked, Keys: []string{"b"}, Ctx: ctxBoard, Group: "Move", Help: "blocked", Footer: 4},
-		// group.on and group.off share t and are mutually exclusive through
-		// enabled(): the kit has no state-dependent label, and the hint must
-		// say which way t goes.
-		keys.Binding{Action: actGroup, Keys: []string{"t"}, Ctx: ctxBoard, Group: "View", Help: "group", Footer: 5},
-		keys.Binding{Action: actUngroup, Keys: []string{"t"}, Ctx: ctxBoard, Group: "View", Help: "ungroup", Footer: 5},
-		keys.Binding{Action: actDown, Keys: []string{"j", "down"}, Ctx: ctxBoard, Group: "Move", Help: "down", Footer: 6},
-		keys.Binding{Action: actUp, Keys: []string{"k", "up"}, Ctx: ctxBoard, Group: "Move", Help: "up", Footer: 6},
-		keys.Binding{Action: actPrevCol, Keys: []string{"h", "left"}, Ctx: ctxBoard, Group: "Move", Help: "prev column", Footer: 7},
-		keys.Binding{Action: actNextCol, Keys: []string{"l", "right"}, Ctx: ctxBoard, Group: "Move", Help: "next column", Footer: 7},
+		// One action whose label follows the board: the hint says which way
+		// t goes, so it reads "ungroup" once the board is grouped.
+		keys.Binding{Action: actGroup, Keys: []string{"t"}, Ctx: ctxBoard, Group: "View", Help: "group",
+			Labels: map[string]string{stateOn: "ungroup"}, Footer: 5},
+		// Declared h, j, k, l so the collapsed footer hint reads `hjkl move`.
+		keys.Binding{Action: actPrevCol, Keys: []string{"h", "left"}, Ctx: ctxBoard, Group: "Move", Help: "prev column", Footer: 6, FooterGroup: "move"},
+		keys.Binding{Action: actDown, Keys: []string{"j", "down"}, Ctx: ctxBoard, Group: "Move", Help: "down", Footer: 6, FooterGroup: "move"},
+		keys.Binding{Action: actUp, Keys: []string{"k", "up"}, Ctx: ctxBoard, Group: "Move", Help: "up", Footer: 6, FooterGroup: "move"},
+		keys.Binding{Action: actNextCol, Keys: []string{"l", "right"}, Ctx: ctxBoard, Group: "Move", Help: "next column", Footer: 6, FooterGroup: "move"},
 
 		// q closes the pane before it quits the app: the layering predates
-		// the table, and esc alone is not what people reach for first.
-		keys.Binding{Action: actDetailClose, Keys: []string{"esc", "q"}, Ctx: ctxDetail, Group: "Detail", Help: "close", Footer: 1},
+		// the table, and esc alone is not what people reach for first. The
+		// footer then offers ctrl+c for quit, so nothing it shows is a lie.
+		keys.Binding{Action: actDetailClose, Keys: []string{"esc", "q"}, Ctx: ctxDetail, Group: "Detail", Help: "close", Footer: 1,
+			Shadows: []string{actQuit}},
 
 		keys.Binding{Action: actHelpClose, Keys: []string{"esc"}, Ctx: ctxHelp, Group: "Help", Help: "close help", Footer: 1},
 		keys.Binding{Action: actHelpDown, Keys: []string{"j", "down"}, Ctx: ctxHelp, Group: "Help", Help: "scroll down"},
@@ -77,61 +74,53 @@ func defaultKeymap() keys.Keymap {
 	)
 }
 
-// baseKeymap backs models built without New (tests construct Model literals):
-// a zero keys.Keymap resolves nothing.
+// stateOn is the Labels state of a toggle that is currently on.
+const stateOn = "on"
+
+// stacks are every context stack the board can show, innermost first. The
+// conflict check and the override loader both read them, so a user rebinding
+// cannot create a shadow the tests would have caught.
+var stacks = [][]keys.Ctx{
+	{ctxBoard, ctxGlobal},
+	{ctxDetail, ctxBoard, ctxGlobal},
+	{ctxHelp, ctxGlobal},
+}
+
+// baseKeymap backs models built without New (tests construct Model literals).
 var baseKeymap = defaultKeymap()
 
-// KeysPath is the user override file, `{action: [keys...]}` in YAML.
-func KeysPath() string {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = "."
-		}
-		base = filepath.Join(home, ".config")
-	}
-	return filepath.Join(base, "brd", "keys.yaml")
-}
-
-// keymap is the table in effect.
-func (m Model) keymap() keys.Keymap {
-	if m.km != nil {
-		return *m.km
-	}
-	return baseKeymap
-}
+// keymap is the table in effect: the user's, or the defaults for a zero km.
+func (m Model) keymap() keys.Keymap { return m.km.Or(baseKeymap) }
 
 // active is the context stack, innermost first.
 func (m Model) active() []keys.Ctx {
 	switch {
 	case m.help:
-		return []keys.Ctx{ctxHelp, ctxGlobal}
+		return stacks[2]
 	case m.detail:
-		return []keys.Ctx{ctxDetail, ctxBoard, ctxGlobal}
+		return stacks[1]
 	}
-	return []keys.Ctx{ctxBoard, ctxGlobal}
+	return stacks[0]
 }
 
-// canRun gates dispatch. Only the group pair is gated: every other key keeps
-// working even when the hint bar does not offer it, as it did before the table.
-func (m Model) canRun(action string) bool {
-	switch action {
-	case actGroup:
-		return !m.group
-	case actUngroup:
-		return m.group
-	}
-	return true
+// keyOpts is the model's view of its actions for one Resolve, Footer or Help
+// call. Nothing is disabled: every key keeps working even when the hint bar
+// does not offer it, as it did before the table.
+func (m Model) keyOpts() keys.Opts {
+	return keys.Opts{Visible: m.inFooter, State: m.keyState}
 }
 
-// inFooter decides which runnable keys the hint bar offers: only the ones that
-// would do something visible right now. A bar that lists everything pushes
-// the keys a lost user needs off its end.
+func (m Model) keyState(action string) string {
+	if action == actGroup && m.group {
+		return stateOn
+	}
+	return ""
+}
+
+// inFooter decides which keys the hint bar offers: only the ones that would
+// do something visible right now. A bar that lists everything pushes the keys
+// a lost user needs off its end.
 func (m Model) inFooter(action string) bool {
-	if !m.canRun(action) {
-		return false
-	}
 	switch action {
 	case actDown, actUp, actPrevCol, actNextCol:
 		return !m.detail && len(m.items) > 0
@@ -143,30 +132,15 @@ func (m Model) inFooter(action string) bool {
 	case actBlocked:
 		return !m.detail && m.col != 0 && len(m.inColumn(0)) > 0
 	case actGroup:
-		// Grouping is only worth offering once two items share a group;
-		// below that it is a key that visibly does nothing.
-		return m.sharedGroups()
+		// Ungrouping is always worth offering; grouping only once two items
+		// share a group, below which it is a key that visibly does nothing.
+		return m.group || m.sharedGroups()
 	}
 	return true
 }
 
-// helpSections lists every context's keys, not just the active stack's, so
-// the help page documents the detail pane while the board is showing.
+// helpSections documents the board and the detail pane together, so the help
+// page lists the pane's keys while the board is showing.
 func (m Model) helpSections() []keys.Section {
-	km := m.keymap()
-	sections := append(km.Help([]keys.Ctx{ctxBoard, ctxGlobal}), km.Help([]keys.Ctx{ctxDetail})...)
-	// The space bar's key string is " ", which reads as nothing in a list of
-	// keys; the kit has no display names, so name it here.
-	for _, sec := range sections {
-		for i := range sec.Entries {
-			ks := slices.Clone(sec.Entries[i].Keys)
-			for j, k := range ks {
-				if k == " " {
-					ks[j] = "space"
-				}
-			}
-			sec.Entries[i].Keys = ks
-		}
-	}
-	return sections
+	return m.keymap().Help(m.keyOpts(), stacks[0], stacks[1])
 }

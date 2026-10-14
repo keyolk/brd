@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/render"
 	"github.com/keyolk/tuikit/toast"
 )
@@ -16,8 +17,7 @@ import (
 // board builds a model with fixed items, bypassing the database. The view is
 // a pure function of the model, so rendering needs no store.
 func board(w, h int, items ...store.Item) Model {
-	m := Model{items: items, w: w, h: h}
-	return m
+	return Model{items: items, w: w, h: h, saver: prefs.NewSaver[uiState](appName, 0)}
 }
 
 func item(id, repo, title, state, blockedOn string, kids ...store.Child) store.Item {
@@ -129,7 +129,7 @@ func TestEmptyBoardExplainsItself(t *testing.T) {
 func TestHintsOnlyListLiveKeys(t *testing.T) {
 	t.Run("empty board hides navigation", func(t *testing.T) {
 		hints := board(140, 20).renderHints()
-		if strings.Contains(hints, "j down") || strings.Contains(hints, "h prev") {
+		if strings.Contains(hints, "move") {
 			t.Errorf("empty board offered navigation: %q", hints)
 		}
 		if !strings.Contains(hints, "q quit") {
@@ -651,6 +651,8 @@ func TestSelectionFollowsTheItemAcrossReorders(t *testing.T) {
 // ever cleared it.
 func TestErrorToastPersistsUntilAKeyAfterItWasSeen(t *testing.T) {
 	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	now := time.Now()
+	m.toasts = toast.WithClock(m.toasts, func() time.Time { return now })
 	next, _ := m.Update(pollMsg{err: errString("gh: not logged in")})
 	m = next.(Model)
 	got := m.toasts.Items()
@@ -661,9 +663,8 @@ func TestErrorToastPersistsUntilAKeyAfterItWasSeen(t *testing.T) {
 		t.Errorf("error not in the bottom bar: %q", h)
 	}
 	// The kit ignores a key within MinDwell of the error landing (it was
-	// likely already in flight); toast.Queue has no injectable clock, so the
-	// test waits it out.
-	time.Sleep(toast.MinDwell)
+	// likely already in flight), so the clock moves past it.
+	m.toasts = toast.WithClock(m.toasts, func() time.Time { return now.Add(toast.MinDwell) })
 	next, _ = m.handleKey(keyMsg("j"))
 	if got := next.(Model).toasts.Items(); len(got) != 0 {
 		t.Errorf("error toast survived a keystroke: %+v", got)

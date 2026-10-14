@@ -16,7 +16,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/keyolk/brd/internal/pulls"
 	"github.com/keyolk/brd/internal/store"
-	"github.com/keyolk/tuikit/async"
 	"github.com/keyolk/tuikit/keys"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/theme"
@@ -96,20 +95,22 @@ type Model struct {
 	// toasts carry the outcome of actions and background work. Info expires
 	// on its own tick; an error stays until a key after it has been seen.
 	toasts toast.Queue
-	ascii  bool // toast prefixes as words, for terminals without ✓/✗
-	pulls  []store.Pull
+	// th styles the hint bar, toasts and help, and picks ASCII key names and
+	// toast prefixes for terminals without ✓/✗. The zero Theme renders plain.
+	th    theme.Theme
+	pulls []store.Pull
 	// polling guards against stacking gh calls when one runs long: the timer
 	// keeps firing regardless of how slow the network is.
 	polling bool
 
-	km      *keys.Keymap // nil means the defaults; see keymap()
-	help    bool         // help overlay open
-	helpOff int          // help scroll offset
+	km      keys.Keymap // zero means the defaults; see keymap()
+	help    bool        // help overlay open
+	helpOff int         // help scroll offset, clamped by keys.RenderHelp
 
-	// saved is the UI state last handed to the save debounce; saveGen drops
-	// a debounce tick that a newer change superseded.
-	saved   uiState
-	saveGen async.Gen
+	// saved is the UI state last handed to saver, so an unchanged state is
+	// not re-armed on every message.
+	saved uiState
+	saver prefs.Saver[uiState]
 	// quitting waits for the final state write before tea.Quit, and saveErr
 	// keeps that write's failure for the caller once the screen is gone.
 	quitting bool
@@ -120,9 +121,9 @@ type Model struct {
 // the last run left behind. Neither failing stops the board: the defaults are
 // used and an error toast says what was ignored.
 func New(db *store.DB) Model {
-	m := Model{db: db, ascii: theme.DetectGlyphs(appName).ASCII}
-	km, err := baseKeymap.LoadOverrides(KeysPath())
-	m.km = &km
+	m := Model{db: db, th: newTheme(), saver: prefs.NewSaver[uiState](appName, 0)}
+	km, err := baseKeymap.LoadOverrides(keys.ConfigPath(appName), stacks...)
+	m.km = km
 	if err != nil {
 		m.toasts, _ = toast.Push(m.toasts, toast.Toast{Source: "keys", Text: err.Error(), Level: toast.Error})
 	}
@@ -301,14 +302,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toasts = toast.Update(m.toasts, msg)
 		return m, nil
 
-	case saveTickMsg:
-		if !m.saveGen.Is(msg.gen) {
-			return m, nil // a newer change re-armed the debounce
-		}
-		return m, prefs.SaveCmd(appName, m.saved)
+	case prefs.SaveTick:
+		var cmd tea.Cmd
+		m.saver, cmd = m.saver.Update(msg)
+		return m, cmd
 
 	case prefs.Saved:
-		if m.quitting {
+		if msg.Final {
 			m.saveErr = msg.Err
 			return m, tea.Quit
 		}
@@ -369,7 +369,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.quitting {
 		return m, nil // the final save is in flight; quit follows it
 	}
-	b, ok := m.keymap().Resolve(m.active(), msg, m.canRun)
+	b, ok := m.keymap().Resolve(m.active(), msg, m.keyOpts())
 	if !ok {
 		return m, nil
 	}
@@ -383,8 +383,10 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 		// Write the final state, then quit when the write reports back: a
 		// debounce still pending would otherwise die with the program.
 		m.quitting = true
-		m.saved = m.uiState()
-		return m, prefs.SaveCmd(appName, m.saved)
+		m.saver, _ = m.saver.Save(m.uiState()) // the debounce tick is dropped: Flush supersedes it
+		var cmd tea.Cmd
+		m.saver, cmd = m.saver.Flush()
+		return m, cmd
 
 	case actDetailClose:
 		// esc and q back out of the pane. On the bare board esc is unbound:
@@ -404,9 +406,9 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 		m.toasts, cmd = toast.Release(m.toasts)
 		return m, cmd
 	case actHelpDown:
-		m.helpOff++
+		_, m.helpOff = m.helpLines(m.helpOff + 1)
 	case actHelpUp:
-		m.helpOff = max(0, m.helpOff-1)
+		_, m.helpOff = m.helpLines(m.helpOff - 1)
 
 	case actDown:
 		m.resolve()
@@ -436,13 +438,13 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 			m.detail = !m.detail
 		}
 
-	case actGroup, actUngroup:
+	case actGroup:
 		// Group by ticket. Off by default: it only helps once several
 		// sessions share one, and a board of ungrouped items reads worse
 		// with a header above every single row.
 		// The selection survives the reorder: it is the same item, just at a
 		// new position.
-		m.group = action == actGroup
+		m.group = !m.group
 		m.resolve()
 
 	case actJump:

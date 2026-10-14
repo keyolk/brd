@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -35,25 +33,19 @@ func (m *Model) restore(st uiState) {
 	m.saved = m.uiState()
 }
 
-// saveDelay coalesces a burst of changes (holding j) into one write. Each
-// write runs off the UI loop, but two in flight could finish out of order and
-// leave the older state on disk; the debounce makes overlap unlikely and the
-// generation drops every tick but the last.
-const saveDelay = 500 * time.Millisecond
-
-type saveTickMsg struct{ gen uint64 }
-
-// armSave re-arms the debounce when the state differs from the last one
-// armed, and returns nil otherwise.
+// armSave hands the state to the debounced saver when it differs from the
+// last one handed over, and returns nil otherwise. The saver coalesces a burst
+// (holding j) into one write, off the UI loop, and orders writes so an older
+// state never lands after a newer one.
 func (m *Model) armSave() tea.Cmd {
 	st := m.uiState()
 	if st == m.saved || m.quitting {
 		return nil
 	}
 	m.saved = st
-	var gen uint64
-	m.saveGen, gen = m.saveGen.Next()
-	return tea.Tick(saveDelay, func(time.Time) tea.Msg { return saveTickMsg{gen: gen} })
+	var cmd tea.Cmd
+	m.saver, cmd = m.saver.Save(st)
+	return cmd
 }
 
 // SaveErr is the error from the final state write at quit, if any. The board

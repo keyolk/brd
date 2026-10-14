@@ -54,16 +54,16 @@ func TestStateWritesAreDebounced(t *testing.T) {
 	if first == nil {
 		t.Fatal("changing column armed no save")
 	}
-	staleGen := m.saveGen.Current()
+	stale := m.saver.TickMsg()
 	next, _ = m.Update(keyMsg("l"))
 	m = next.(Model)
 
-	next, cmd := m.Update(saveTickMsg{gen: staleGen})
+	next, cmd := m.Update(stale)
 	if cmd != nil {
 		t.Error("a superseded debounce tick still wrote")
 	}
 	m = next.(Model)
-	_, cmd = m.Update(saveTickMsg{gen: m.saveGen.Current()})
+	_, cmd = m.Update(m.saver.TickMsg())
 	if cmd == nil {
 		t.Fatal("the latest debounce tick did not write")
 	}
@@ -136,7 +136,36 @@ func TestDetailFooterIsHonestAboutQ(t *testing.T) {
 	if !strings.Contains(h, "esc close") || strings.Contains(h, "q quit") || !strings.Contains(h, "ctrl+c quit") {
 		t.Errorf("detail footer = %q", h)
 	}
-	if strings.Contains(h, "j down") {
+	if strings.Contains(h, "move") {
 		t.Errorf("detail footer offers navigation: %q", h)
+	}
+}
+
+// Holding j at the end of the help page does not grow the offset past the
+// last page, so one k moves the page back at once.
+func TestHelpOffsetIsClamped(t *testing.T) {
+	m := board(80, 12)
+	m = press(m, "?")
+	for range 50 {
+		m = press(m, "j")
+	}
+	last := m.helpOff
+	if last <= 0 || last >= 50 {
+		t.Fatalf("offset after 50 j = %d, want clamped to the last page", last)
+	}
+	if m = press(m, "k"); m.helpOff != last-1 {
+		t.Errorf("k moved the offset to %d, want %d", m.helpOff, last-1)
+	}
+}
+
+// Only the final flush quits: an earlier debounced write landing while the
+// quit is in flight must not end the program before the latest state is on
+// disk.
+func TestOnlyTheFinalWriteQuits(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	m := board(140, 20)
+	m.quitting = true
+	if _, cmd := m.Update(prefs.Saved{App: appName}); cmd != nil {
+		t.Error("a non-final write ended the board")
 	}
 }
