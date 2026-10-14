@@ -541,11 +541,13 @@ func (m Model) renderDetail(height int) string {
 	row("started", Stamp(it.CreatedAt))
 	row("session", it.ID)
 
+	// Label and title cells pad by display width (render.PadRight), not by
+	// rune as %-Ns does, so a Korean title keeps the next column aligned.
 	if len(it.Children) > 0 {
 		b.WriteString("\n" + headStyle.Render(
 			fmt.Sprintf("in flight (%d)", len(it.Children))) + "\n")
 		for _, c := range it.Children {
-			line := fmt.Sprintf("%-12s %-22s %s", c.Kind, render.Truncate(c.Label, 22), c.State)
+			line := fmt.Sprintf("%-12s %s %s", c.Kind, render.PadRight(render.Truncate(c.Label, 22), 22), c.State)
 			if c.Detail != "" {
 				line += dim.Render("  " + c.Detail)
 			}
@@ -560,7 +562,7 @@ func (m Model) renderDetail(height int) string {
 			if p.State == "OPEN" {
 				state = fmt.Sprintf("%s · %s", reviewLabel(p.Review), p.Checks)
 			}
-			line := fmt.Sprintf("#%-6d %-34s %s", p.Number, render.Truncate(p.Title, 34), state)
+			line := fmt.Sprintf("#%-6d %s %s", p.Number, render.PadRight(render.Truncate(p.Title, 34), 34), state)
 			style := lipgloss.NewStyle()
 			if p.Attention() {
 				style = style.Foreground(blockedFg)

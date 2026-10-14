@@ -776,3 +776,26 @@ func TestDetailSaysWhatItCut(t *testing.T) {
 		t.Errorf("view is %d lines, taller than the 15-line terminal", got)
 	}
 }
+
+// PR rows pad titles by display width, so a Korean title does not push its
+// state column right of an ASCII one's.
+func TestDetailPullColumnsAlignWithWideTitles(t *testing.T) {
+	it := item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt")
+	it.Branch = "feat/x"
+	m := board(140, 30, it)
+	m.setRow(0)
+	m.detail = true
+	m.pulls = []store.Pull{
+		{Number: 1, Branch: "feat/x", Title: "plain title", State: "MERGED"},
+		{Number: 2, Branch: "feat/x", Title: "한글 제목", State: "MERGED"},
+	}
+	var at []int
+	for _, line := range strings.Split(m.View(), "\n") {
+		if i := strings.Index(line, "merged"); i >= 0 && strings.Contains(line, "#") {
+			at = append(at, lipglossWidth(line[:i]))
+		}
+	}
+	if len(at) != 2 || at[0] != at[1] {
+		t.Errorf("state column starts at %v, want two equal offsets", at)
+	}
+}
