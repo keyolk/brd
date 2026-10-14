@@ -32,10 +32,6 @@ var (
 const minColWidth = 22
 
 func (m Model) View() string {
-	if m.err != nil {
-		return "\n  " + lipgloss.NewStyle().Foreground(blockedFg).Render(
-			"board unavailable: "+m.err.Error()) + "\n\n  r retry · q quit\n"
-	}
 	if m.w == 0 {
 		return "" // pre-first-WindowSizeMsg; drawing now would flash a wrong layout
 	}

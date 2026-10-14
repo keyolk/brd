@@ -50,7 +50,9 @@ type tickMsg time.Time
 type loadedMsg struct {
 	items []store.Item
 	pulls []store.Pull
-	err   error
+	err   error // items could not be read; nothing in this message is usable
+	// pullsErr means the items are fresh but the PR table was not readable.
+	pullsErr error
 }
 
 // pollMsg carries the outcome of one PR poll.
@@ -68,7 +70,9 @@ const pollInterval = 60 * time.Second
 type Model struct {
 	db     *store.DB
 	items  []store.Item
-	err    error
+	// loadFailed records that the last refresh failed, so the next good one
+	// can say the board is current again.
+	loadFailed bool
 	col    int // focused column
 	// sel is the selected item's ID — the source of truth for the selection.
 	// Items arrive ordered by updated_at, so any session finishing a turn
@@ -116,7 +120,7 @@ func (m Model) load() tea.Cmd {
 		// pane it is cheaper than the database read it accompanies.
 		items = applyLiveness(items, liveSessions())
 		prs, err := m.db.Pulls()
-		return loadedMsg{items: items, pulls: prs, err: err}
+		return loadedMsg{items: items, pulls: prs, pullsErr: err}
 	}
 }
 
@@ -258,7 +262,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = false
 		if msg.err != nil {
 			// A PR poll failing is not a broken board — gh may simply not be
-			// logged in — so it goes to the status line, not m.err.
+			// logged in — so it goes to the status line.
 			m.setStatus(statusError, "PR poll: "+msg.err.Error())
 		}
 		return m, m.load()
@@ -270,7 +274,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loadedMsg:
-		m.items, m.pulls, m.err = msg.items, msg.pulls, msg.err
+		// A failed read keeps the last good board and says so in the status
+		// line. Blanking the board for a transient error (a locked database
+		// mid-write) flashed an error screen for one tick and threw away
+		// everything the user was looking at, cursor included.
+		if msg.err != nil {
+			m.loadFailed = true
+			m.setStatus(statusError, "refresh failed, showing last good board: "+msg.err.Error())
+			return m, nil
+		}
+		var cmd tea.Cmd
+		if m.loadFailed {
+			m.loadFailed = false
+			cmd = m.setStatus(statusInfo, "board refreshed")
+		}
+		m.items = msg.items
+		if msg.pullsErr != nil {
+			m.setStatus(statusError, "reading PRs: "+msg.pullsErr.Error())
+		} else {
+			m.pulls = msg.pulls
+		}
 		// Follow the selected item by ID, not position: a refresh reorders
 		// columns by recency, so the same index can name a different session.
 		m.resolve()
@@ -279,7 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.selected(); !ok {
 			m.detail = false
 		}
-		return m, nil
+		return m, cmd
 
 	case jumpMsg:
 		if msg.err != nil {

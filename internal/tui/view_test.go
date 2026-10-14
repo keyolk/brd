@@ -691,3 +691,42 @@ func TestErrorStatusPersistsUntilTheNextKey(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// A failed refresh keeps the last good board and reports the failure in the
+// status line; it used to nil the items and swap in a full-screen error.
+func TestFailedLoadKeepsTheLastGoodBoard(t *testing.T) {
+	a := item("s1", "/src/a", "alpha", store.StateWaiting, "idle_prompt")
+	m := board(140, 20, a)
+	m.pulls = []store.Pull{{Number: 7, State: "OPEN"}}
+	m.setRow(0)
+
+	next, _ := m.Update(loadedMsg{err: errString("database is locked")})
+	m = next.(Model)
+	if len(m.items) != 1 || len(m.pulls) != 1 {
+		t.Fatalf("failed load dropped data: %d items, %d pulls", len(m.items), len(m.pulls))
+	}
+	if sel, ok := m.selected(); !ok || sel.ID != "s1" {
+		t.Errorf("failed load lost the selection")
+	}
+	if m.statusLvl != statusError || !strings.Contains(m.status, "database is locked") {
+		t.Errorf("failure not reported as an error status: %q", m.status)
+	}
+	if out := m.View(); !strings.Contains(out, "alpha") {
+		t.Errorf("board not rendered after a failed load:\n%s", out)
+	}
+
+	// The next good load says the board is current again, as info.
+	next, cmd := m.Update(loadedMsg{items: []store.Item{a}, pulls: m.pulls})
+	m = next.(Model)
+	if m.statusLvl != statusInfo || cmd == nil {
+		t.Errorf("recovery not announced as expiring info: %q (lvl %d)", m.status, m.statusLvl)
+	}
+
+	// Items fresh but PR table unreadable: take the items, keep the PRs.
+	b := item("s2", "/src/b", "beta", store.StateWaiting, "idle_prompt")
+	next, _ = m.Update(loadedMsg{items: []store.Item{a, b}, pullsErr: errString("no such table")})
+	m = next.(Model)
+	if len(m.items) != 2 || len(m.pulls) != 1 {
+		t.Errorf("partial load: %d items, %d pulls; want 2 and the old 1", len(m.items), len(m.pulls))
+	}
+}
