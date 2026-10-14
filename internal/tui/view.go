@@ -6,6 +6,10 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
+	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/theme"
+	"github.com/keyolk/tuikit/toast"
 )
 
 // Palette. Only the Blocked column gets a warm color: if every column were
@@ -46,7 +50,46 @@ func (m Model) View() string {
 	} else {
 		body = m.renderColumns(bodyH)
 	}
-	return header + "\n" + body + "\n" + hints
+	frame := header + "\n" + body + "\n" + hints
+	if !m.help {
+		return frame
+	}
+	// Over the board, not instead of it: the user keeps sight of what the
+	// keys act on.
+	return render.Center(render.Dim(frame), m.renderHelp(), m.w, m.h)
+}
+
+var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+	BorderForeground(accentFg).Padding(0, 1)
+
+// renderHelp is the `?` overlay, derived from the binding table so it cannot
+// drift from what the keys do.
+func (m Model) renderHelp() string {
+	lines, _, w, h := m.helpLines(m.helpOff)
+	if lines == nil {
+		return helpBox.Render("? help needs a larger terminal")
+	}
+	return render.Box("", strings.Join(lines, "\n"), w, h, helpBox)
+}
+
+// helpLines lays the help page out at offset and returns the offset clamped
+// to the last full page, plus the outer size of the box it fits. Update
+// stores that offset, so holding j at the end does not grow it past what k
+// has to undo; View passes the stored one. nil lines mean the terminal is
+// too small for the box.
+func (m Model) helpLines(offset int) (lines []string, off, w, h int) {
+	sections := m.helpSections()
+	// The box keeps 2 cells of margin on each side and is as tall as the
+	// page, up to the screen.
+	w = min(56, m.w-4)
+	cw, _ := render.BoxContent(w, 0, helpBox)
+	h = min(keys.HelpLineCount(sections, cw)+helpBox.GetVerticalFrameSize(), m.h-4)
+	cw, ch := render.BoxContent(w, h, helpBox)
+	if cw < 10 || ch < 1 {
+		return nil, 0, 0, 0
+	}
+	lines, off = keys.RenderHelp(sections, cw, ch, offset, m.th.HelpStyle())
+	return lines, off, w, h
 }
 
 // renderHeader leads with the blocked count, because that is the number the
@@ -83,52 +126,30 @@ func (m Model) renderHeader() string {
 	return left + "  " + strings.Join(parts, dim.Render(" · "))
 }
 
-// renderHints shows only the keys that do something right now.
+// renderHints is the bottom bar: pending toasts, or else the keys that do
+// something right now.
 //
-// A hint bar wider than the terminal truncates from the right, and what
-// falls off is whatever was listed last — so a bar that lists everything
-// hides the keys a lost user needs most. Keys appear here only when they
-// would act.
+// A toast outranks the key list: it is the answer to a keystroke the user
+// just pressed, or news about the board, and it is transient. The keys come
+// from the binding table, filtered by inFooter (keyOpts.Visible) and dropped from the
+// low-priority end with `…` when narrow; `? help` and `q quit` are pinned.
 func (m Model) renderHints() string {
-	// A message from the last action outranks the key list: it is the answer
-	// to a keystroke the user just pressed, and it is transient.
-	if m.status != "" {
-		// Red is reserved for failures; an informational message in the
-		// same color reads as something having gone wrong.
-		fg := accentFg
-		if m.statusLvl == statusError {
-			fg = blockedFg
-		}
-		return lipgloss.NewStyle().Foreground(fg).
-			Render(truncate(m.status, m.w))
+	if t := toast.View(m.toasts, m.w, m.th.ToastStyles()); t != "" {
+		return t
 	}
-
-	var keys []string
-	if m.detail {
-		keys = append(keys, "esc close")
-	} else if len(m.items) > 0 {
-		keys = append(keys, "hjkl move", "↵ detail")
-	}
-	if _, ok := m.selected(); ok {
-		keys = append(keys, "J jump", "R resume")
-	}
-	if !m.detail && len(m.inColumn(0)) > 0 && m.col != 0 {
-		keys = append(keys, "b blocked")
-	}
-	// Grouping is only worth offering once two items actually share a ticket;
-	// below that it is a key that visibly does nothing.
-	if m.group || m.sharedGroups() {
-		keys = append(keys, "t "+ternary(m.group, "ungroup", "group"))
-	}
-	keys = append(keys, "r refresh", "q quit")
-	return dim.Render(truncate(strings.Join(keys, " · "), m.w))
+	return m.keymap().Footer(m.active(), m.w, m.keyOpts(), m.th.FooterStyle())
 }
 
-func ternary(cond bool, yes, no string) string {
-	if cond {
-		return yes
-	}
-	return no
+// newTheme maps brd's palette onto the kit's roles, so the hint bar, toasts
+// and help share the board's colors. Red stays for failures only: an
+// informational toast in the same color reads as something having gone wrong.
+func newTheme() theme.Theme {
+	r := theme.DefaultRoles()
+	r.Muted, r.Subtle = dimFg, dimFg
+	r.Accent, r.Info, r.BorderFocus = accentFg, accentFg, accentFg
+	r.Success = workingFg
+	r.Warn, r.Error = blockedFg, blockedFg
+	return theme.NewWith(nil, r, theme.DetectGlyphs(appName))
 }
 
 func (m Model) renderColumns(height int) string {
@@ -155,11 +176,12 @@ func (m Model) renderColumns(height int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, joined...)
 }
 
-// bodyHeight is the terminal height minus the one-line header and the
-// one-line hint bar (both are truncated to a single line), so the columns
-// never overflow into the hint bar and push it off screen.
+// bodyHeight is the terminal height minus the one-line header and the bottom
+// bar — one line of keys, or one line per pending toast — so the columns
+// never overflow into the bar and push it off screen. It reads only model
+// state, so syncScroll in Update and View agree on it.
 func (m Model) bodyHeight() int {
-	return max(3, m.h-2)
+	return max(3, m.h-1-lipgloss.Height(m.renderHints()))
 }
 
 func max(a, b int) int {
@@ -185,7 +207,7 @@ func (m Model) cardBlocks(idx, w int, focused bool) [][]string {
 			if key := it.GroupKey(); key != lastGroup {
 				lastGroup = key
 				if label := it.GroupLabel(); label != "" {
-					lines = append(lines, headStyle.Render(truncate(groupHeader(it), w)))
+					lines = append(lines, headStyle.Render(render.Truncate(groupHeader(it), w)))
 				}
 			}
 		}
@@ -264,7 +286,7 @@ func visibleEnd(heights []int, off, avail int) int {
 func scrolledLines(blocks [][]string, start, end, avail, w int) []string {
 	var lines []string
 	if start > 0 {
-		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↑ %d more", start), w)))
+		lines = append(lines, dim.Render(render.Truncate(fmt.Sprintf("↑ %d more", start), w)))
 	}
 	for _, b := range blocks[start:end] {
 		lines = append(lines, b...)
@@ -275,7 +297,7 @@ func scrolledLines(blocks [][]string, start, end, avail, w int) []string {
 		if len(lines) > room {
 			lines = lines[:max(room, 0)]
 		}
-		lines = append(lines, dim.Render(truncate(fmt.Sprintf("↓ %d more", more), w)))
+		lines = append(lines, dim.Render(render.Truncate(fmt.Sprintf("↓ %d more", more), w)))
 	}
 	if len(lines) > avail {
 		lines = lines[:avail]
@@ -331,7 +353,7 @@ func (m Model) renderColumn(idx int, col Column, w, height int) string {
 	lines := []string{title}
 
 	if len(in) == 0 {
-		lines = append(lines, dim.Render(truncate(col.Hint, w)))
+		lines = append(lines, dim.Render(render.Truncate(col.Hint, w)))
 	}
 	start, end := m.columnWindow(idx, height-1)
 	lines = append(lines, scrolledLines(m.cardBlocks(idx, w, focused), start, end, height-1, w)...)
@@ -369,7 +391,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 	if !it.Live {
 		titleStyle = titleStyle.Foreground(dimFg)
 	}
-	title := titleStyle.Render(truncate(Label(it), w-2))
+	title := titleStyle.Render(render.Truncate(Label(it), w-2))
 
 	// The second line answers "since when, and why here". The stamp comes
 	// first because it is the fixed point you correlate against; the age is
@@ -389,7 +411,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 	}
 	sub := dim.Render(RepoName(it.Repo)) + " " + metaStyle.Render(meta)
 
-	lines := []string{marker + title, "  " + truncate(sub, w-2)}
+	lines := []string{marker + title, "  " + render.Truncate(sub, w-2)}
 
 	// A PR gets its own line rather than being crammed onto the meta line:
 	// it is a different clock (someone else's review, not this session's
@@ -399,7 +421,7 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 		if attention {
 			style = lipgloss.NewStyle().Foreground(blockedFg)
 		}
-		lines = append(lines, "  "+style.Render(truncate(badge, w-2)))
+		lines = append(lines, "  "+style.Render(render.Truncate(badge, w-2)))
 	}
 	return lines
 }
@@ -491,14 +513,14 @@ func (m Model) renderDetail(height int) string {
 		return dim.Render("nothing selected")
 	}
 	var b strings.Builder
-	b.WriteString(bold.Render(truncate(Label(it), m.w)) + "\n")
+	b.WriteString(bold.Render(render.Truncate(Label(it), m.w)) + "\n")
 
 	row := func(k, v string) {
 		if v == "" {
 			return
 		}
 		b.WriteString(dim.Render(fmt.Sprintf("%-10s ", k)) +
-			truncate(v, m.w-11) + "\n")
+			render.Truncate(v, m.w-11) + "\n")
 	}
 	state := it.State
 	if it.BlockedOn != "" {
@@ -519,15 +541,17 @@ func (m Model) renderDetail(height int) string {
 	row("started", Stamp(it.CreatedAt))
 	row("session", it.ID)
 
+	// Label and title cells pad by display width (render.PadRight), not by
+	// rune as %-Ns does, so a Korean title keeps the next column aligned.
 	if len(it.Children) > 0 {
 		b.WriteString("\n" + headStyle.Render(
 			fmt.Sprintf("in flight (%d)", len(it.Children))) + "\n")
 		for _, c := range it.Children {
-			line := fmt.Sprintf("%-12s %-22s %s", c.Kind, truncate(c.Label, 22), c.State)
+			line := fmt.Sprintf("%-12s %s %s", c.Kind, render.PadRight(render.Truncate(c.Label, 22), 22), c.State)
 			if c.Detail != "" {
 				line += dim.Render("  " + c.Detail)
 			}
-			b.WriteString("  " + truncate(line, m.w-2) + "\n")
+			b.WriteString("  " + render.Truncate(line, m.w-2) + "\n")
 		}
 	}
 	if prs := m.pullsFor(it); len(prs) > 0 {
@@ -538,18 +562,18 @@ func (m Model) renderDetail(height int) string {
 			if p.State == "OPEN" {
 				state = fmt.Sprintf("%s · %s", reviewLabel(p.Review), p.Checks)
 			}
-			line := fmt.Sprintf("#%-6d %-34s %s", p.Number, truncate(p.Title, 34), state)
+			line := fmt.Sprintf("#%-6d %s %s", p.Number, render.PadRight(render.Truncate(p.Title, 34), 34), state)
 			style := lipgloss.NewStyle()
 			if p.Attention() {
 				style = style.Foreground(blockedFg)
 			}
-			b.WriteString("  " + style.Render(truncate(line, m.w-2)) + "\n")
+			b.WriteString("  " + style.Render(render.Truncate(line, m.w-2)) + "\n")
 		}
 	}
 
 	if it.LastMessage != "" {
 		b.WriteString("\n" + headStyle.Render("last message") + "\n")
-		b.WriteString("  " + truncate(it.LastMessage, m.w-2) + "\n")
+		b.WriteString("  " + render.Truncate(it.LastMessage, m.w-2) + "\n")
 	}
 	// Every line above is truncated to the width, so one string line is one
 	// screen line. Cutting with MaxHeight alone dropped the tail of a long
@@ -558,7 +582,7 @@ func (m Model) renderDetail(height int) string {
 	if len(lines) > height {
 		hidden := len(lines) - (height - 1)
 		lines = append(lines[:height-1], dim.Render(
-			truncate(fmt.Sprintf("↓ %d more lines", hidden), m.w)))
+			render.Truncate(fmt.Sprintf("↓ %d more lines", hidden), m.w)))
 	}
 	return strings.Join(lines, "\n")
 }

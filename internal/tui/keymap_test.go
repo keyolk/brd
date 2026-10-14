@@ -1,9 +1,15 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/prefs"
+	"github.com/keyolk/tuikit/toast"
 
 	"github.com/keyolk/brd/internal/store"
 )
@@ -16,6 +22,16 @@ func keyMsg(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	case "ctrl+c":
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case " ", "space":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
@@ -25,43 +41,6 @@ func keyMsg(s string) tea.KeyMsg {
 func press(m Model, key string) Model {
 	next, _ := m.handleKey(keyMsg(key))
 	return next.(Model)
-}
-
-func TestNormalizeCJKKeyMapsJamoByPhysicalPosition(t *testing.T) {
-	for jamo, want := range map[string]string{
-		"ㅂ": "q", "ㅁ": "a", "ㅋ": "z", "ㅓ": "j", "ㅏ": "k",
-		"ㅃ": "Q", "ㄲ": "R",
-	} {
-		if got := normalizeCJKKey(keyMsg(jamo)).String(); got != want {
-			t.Errorf("normalizeCJKKey(%q) = %q, want %q", jamo, got, want)
-		}
-	}
-}
-
-func TestNormalizeCJKKeyLeavesEverythingElseAlone(t *testing.T) {
-	// Latin keys, digits, and composed syllables pass through: a composed
-	// syllable only reaches the TUI as committed text, never as a shortcut.
-	for _, k := range []string{"q", "R", "0", "가"} {
-		if got := normalizeCJKKey(keyMsg(k)).String(); got != k {
-			t.Errorf("normalizeCJKKey(%q) = %q, want it unchanged", k, got)
-		}
-	}
-	for _, in := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyCtrlC}, {Type: tea.KeyEsc}} {
-		if got := normalizeCJKKey(in); got.String() != in.String() {
-			t.Errorf("normalizeCJKKey(%q) = %q, want it unchanged", in.String(), got.String())
-		}
-	}
-}
-
-func TestNormalizeCJKKeyLeavesPasteAndAltAlone(t *testing.T) {
-	paste := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'ㅂ'}, Paste: true}
-	if got := normalizeCJKKey(paste); got.String() != paste.String() {
-		t.Errorf("pasted jamo was rewritten to %q", got.String())
-	}
-	alt := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'ㅂ'}, Alt: true}
-	if got := normalizeCJKKey(alt); got.String() != alt.String() {
-		t.Errorf("alt chord was rewritten to %q", got.String())
-	}
 }
 
 // Under a Korean input source every shortcut arrives as a jamo. They have to
@@ -130,11 +109,157 @@ func TestEscDoesNotQuitTheBoard(t *testing.T) {
 		t.Fatal("esc did not close the detail pane")
 	}
 
+	// Model{} has the zero Saver, which writes nothing and reports the
+	// final save at once, so this needs no state directory.
 	_, cmd = Model{}.handleKey(keyMsg("q"))
 	if cmd == nil {
 		t.Fatal("q returned no command")
 	}
-	if _, quit := cmd().(tea.QuitMsg); !quit {
+	if _, quit := quitAfterSave(t, Model{}, keyMsg("q")); !quit {
 		t.Fatal("q on the bare board did not quit")
+	}
+}
+
+// quitAfterSave presses key, runs the state write it returns, feeds the
+// result back, and reports whether the board then quit. q writes the UI
+// state first so a pending debounce does not die with the program.
+func quitAfterSave(t *testing.T, m Model, key tea.KeyMsg) (Model, bool) {
+	t.Helper()
+	next, cmd := m.handleKey(key)
+	if cmd == nil {
+		return next.(Model), false
+	}
+	saved, ok := cmd().(prefs.Saved)
+	if !ok {
+		return next.(Model), false
+	}
+	if saved.Err != nil {
+		t.Fatalf("final state write: %v", saved.Err)
+	}
+	next, cmd = next.(Model).Update(saved)
+	if cmd == nil {
+		return next.(Model), false
+	}
+	_, quit := cmd().(tea.QuitMsg)
+	return next.(Model), quit
+}
+
+// The binding table must have no key bound twice in one context, no key that
+// hides quit or help where they are promised (unless the binding declares
+// it), and no shortcut a Korean input source cannot type.
+func TestKeymapHasNoConflicts(t *testing.T) {
+	// J has g as its Korean-reachable alias; the kit judges reachability per
+	// action, so that alone keeps J out of the report.
+	for _, c := range defaultKeymap().Conflicts(stacks...) {
+		t.Error(c)
+	}
+}
+
+// Every key the help page lists must run the action it is listed under in
+// that context, and every action must be in the help page.
+func TestEveryHelpEntryIsReachable(t *testing.T) {
+	km := defaultKeymap()
+	listed := map[string]bool{}
+	for _, sec := range (Model{}).helpSections() {
+		for _, e := range sec.Entries {
+			listed[e.Action] = true
+			stack := stacks[0]
+			if e.Group == "Detail" {
+				stack = stacks[1]
+			}
+			for _, k := range e.Keys {
+				b, ok := km.Resolve(stack, keyMsg(k), keys.Opts{})
+				if !ok || b.Action != e.Action {
+					t.Errorf("help lists %q for %s, but it resolves to %q (ok=%v)", k, e.Action, b.Action, ok)
+				}
+			}
+		}
+	}
+	for _, b := range km.Bindings() {
+		if b.Ctx != ctxHelp && !listed[b.Action] {
+			t.Errorf("action %s is bound but missing from help", b.Action)
+		}
+	}
+}
+
+// t is one action whose label says which way it goes, in the hint bar and
+// in the help page alike.
+func TestGroupLabelFollowsTheBoard(t *testing.T) {
+	shared := []store.Item{
+		item("s1", "/src/a", "a", store.StateWorking, ""),
+		item("s2", "/src/a", "b", store.StateWorking, ""),
+	}
+	m := board(140, 20, shared...)
+	if h := m.renderHints(); !strings.Contains(h, "t group") {
+		t.Errorf("ungrouped footer = %q", h)
+	}
+	m = press(m, "t")
+	if !m.group {
+		t.Fatal("t did not group")
+	}
+	if h := m.renderHints(); !strings.Contains(h, "t ungroup") {
+		t.Errorf("grouped footer = %q", h)
+	}
+	var label string
+	for _, sec := range m.helpSections() {
+		for _, e := range sec.Entries {
+			if e.Action == actGroup {
+				label = e.Help
+			}
+		}
+	}
+	if label != "ungroup" {
+		t.Errorf("help labels t %q while grouped, want ungroup", label)
+	}
+	if m = press(m, "t"); m.group {
+		t.Error("t did not ungroup")
+	}
+}
+
+// g is jump's alias because J cannot be typed under a Korean input source.
+func TestJumpHasAKeyReachableUnderKorean(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	m.setRow(0)
+	_, cmd := m.handleKey(keyMsg("ㅎ")) // physical g
+	if cmd == nil {
+		t.Fatal("ㅎ (physical g) did not jump")
+	}
+	if _, ok := cmd().(jumpMsg); !ok {
+		t.Fatal("ㅎ (physical g) returned something other than a jump")
+	}
+}
+
+// A user file rebinds by action name; a typo in it is reported, not fatal.
+func TestKeyOverridesFile(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cfg, "brd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(body string) {
+		if err := os.WriteFile(keys.ConfigPath(appName), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("refresh: [\"ctrl+r\"]\n")
+	m := New(nil)
+	if b, ok := m.keymap().Resolve(m.active(), tea.KeyMsg{Type: tea.KeyCtrlR}, m.keyOpts()); !ok || b.Action != actRefresh {
+		t.Errorf("ctrl+r resolved to %q (ok=%v), want refresh", b.Action, ok)
+	}
+	if _, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.keyOpts()); ok {
+		t.Error("r still bound after it was overridden")
+	}
+
+	write("refesh: [\"x\"]\n")
+	m = New(nil)
+	items := m.toasts.Items()
+	if len(items) != 1 || items[0].Level != toast.Error || !strings.Contains(items[0].Text, "refesh") {
+		t.Errorf("unknown action not reported as an error toast: %+v", items)
+	}
+	if b, ok := m.keymap().Resolve(m.active(), keyMsg("r"), m.keyOpts()); !ok || b.Action != actRefresh {
+		t.Error("a bad override file did not fall back to the defaults")
 	}
 }
