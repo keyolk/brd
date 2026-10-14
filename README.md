@@ -13,7 +13,7 @@ Blocked 2                           │Working 1                           │Ba
   tweb 23:22 · 3m agent needs input │                                    │  #88 changes requested             │  okx Sep 5 21:25 · 1d
   #88 changes requested             │                                    │                                    │
 
-hjkl move · ↵ detail · J jump · R resume · t group · r refresh · q quit
+enter detail  J jump  R resume  t group  j down  k up  h prev column  l next column  r refresh  ? help  q quit
 ```
 
 ## Why
@@ -195,12 +195,14 @@ brd ls       # the board as text, for a scratch pane or a status line
 | Key | |
 |---|---|
 | `hjkl` / arrows | move between columns and cards |
-| `↵` | detail: PRs, children, branch, ticket, last message |
+| `↵` / space | detail: PRs, children, branch, ticket, last message |
 | `b` | jump to the first blocked item |
-| `J` | switch to the session's tmux pane |
+| `J` / `g` | switch to the session's tmux pane (`g` works under a Korean input source, `J` does not) |
 | `R` | resume the session in this terminal |
 | `t` | group by JIRA ticket |
 | `r` | refresh now |
+| `esc` | close the detail pane or help |
+| `?` | help, drawn from the same table the keys run from |
 | `q` | quit (closes the detail pane first) |
 
 `J` needs no bookkeeping of brd's own: a pane already advertises which Claude
@@ -209,9 +211,28 @@ session it holds, in the `@cc_pane_session` option. When there is no live pane
 `claude --resume <id>` in the session's own directory and hands the terminal
 back when it exits.
 
-Keys appear in the hint bar only when they would do something. A bar wider
-than the terminal truncates from the right, so a bar that lists everything
-hides the keys a lost user needs most.
+Keys appear in the hint bar only when they would do something. When the bar
+is too narrow the lowest-priority hints drop first and `…` says so; `? help`
+and `q quit` always stay. Messages (a failed refresh, a missing pane) take the
+bar's place: information expires after a few seconds, an error stays until
+the next key.
+
+One binding table drives the keys, the hint bar and `?` help. Rebind any
+action in `~/.config/brd/keys.yaml` (`$XDG_CONFIG_HOME/brd/keys.yaml`) by its
+name; an unknown name is reported and the defaults stay:
+
+```yaml
+refresh: ["ctrl+r"]
+jump: ["J", "o"]
+```
+
+Actions: `quit help refresh move.down move.up column.prev column.next
+detail.toggle detail.close blocked group.on group.off jump resume help.close
+help.down help.up`.
+
+Grouping, the focused column and the selected session are kept in
+`$XDG_STATE_HOME/brd/ui.json` (`~/.local/state/brd/ui.json`) and restored on
+the next start; the selection is restored by session ID.
 
 ## Pull requests are the one thing hooks cannot tell you
 
