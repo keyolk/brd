@@ -611,3 +611,35 @@ func TestJumpDoesNotCheckThePaneInsideUpdate(t *testing.T) {
 		t.Errorf("jump() result = %#v, want an error pointing at R", msg)
 	}
 }
+
+// Items arrive ordered by updated_at, so a refresh reorders a column whenever
+// another session finishes a turn. The selection must follow the item, not
+// the index, or J/R act on a session the user never picked.
+func TestSelectionFollowsTheItemAcrossReorders(t *testing.T) {
+	a := item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt")
+	b := item("s2", "/src/b", "b", store.StateWaiting, "idle_prompt")
+	m := board(140, 20, a, b)
+	next, _ := m.handleKey(keyMsg("j"))
+	m = next.(Model)
+	m.detail = true
+	if sel, _ := m.selected(); sel.ID != "s2" {
+		t.Fatalf("j selected %q, want s2", sel.ID)
+	}
+
+	// b gets touched and jumps ahead of a: same two items, opposite order.
+	next, _ = m.Update(loadedMsg{items: []store.Item{b, a}})
+	m = next.(Model)
+	sel, ok := m.selected()
+	if !ok || sel.ID != "s2" {
+		t.Fatalf("after reorder selected %q (ok=%v), want s2", sel.ID, ok)
+	}
+	if m.row != 0 {
+		t.Errorf("row = %d, want 0 (where s2 now sits)", m.row)
+	}
+	if !m.detail {
+		t.Error("detail pane closed although its item is still in the column")
+	}
+	if out := m.View(); !strings.Contains(out, "s2") {
+		t.Errorf("detail pane is not showing s2:\n%s", out)
+	}
+}

@@ -70,7 +70,14 @@ type Model struct {
 	items  []store.Item
 	err    error
 	col    int // focused column
-	row    int // cursor within the focused column
+	// sel is the selected item's ID — the source of truth for the selection.
+	// Items arrive ordered by updated_at, so any session finishing a turn
+	// reorders its column; an index cursor then silently points at a
+	// different session, and J/R act on the wrong one. row is only the last
+	// position sel resolved to, kept for rendering and as the fallback when
+	// sel leaves the column.
+	sel    string
+	row    int
 	w, h   int
 	detail bool   // detail pane open for the selected item
 	group  bool   // group items by JIRA ticket
@@ -153,10 +160,48 @@ func (m Model) inColumn(i int) []store.Item {
 
 func (m Model) selected() (store.Item, bool) {
 	in := m.inColumn(m.col)
+	if m.sel != "" {
+		for _, it := range in {
+			if it.ID == m.sel {
+				return it, true
+			}
+		}
+		return store.Item{}, false
+	}
 	if m.row < 0 || m.row >= len(in) {
 		return store.Item{}, false
 	}
 	return in[m.row], true
+}
+
+// resolve re-derives row from sel after the focused column changed under it
+// (a refresh, a regroup). If sel is gone from the column the cursor stays at
+// the same position, clamped, and sel moves to whatever sits there now.
+func (m *Model) resolve() {
+	in := m.inColumn(m.col)
+	if m.sel != "" {
+		for i, it := range in {
+			if it.ID == m.sel {
+				m.row = i
+				return
+			}
+		}
+	}
+	m.setRow(m.row)
+}
+
+// setRow moves the cursor to a position in the focused column and records
+// the item there as the selection.
+func (m *Model) setRow(row int) {
+	in := m.inColumn(m.col)
+	m.row = clampRow(row, len(in))
+	if m.row < 0 {
+		m.row = 0
+	}
+	m.sel = ""
+	if m.row < len(in) {
+		m.sel = in[m.row].ID
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -186,13 +231,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loadedMsg:
 		m.items, m.pulls, m.err = msg.items, msg.pulls, msg.err
-		// The cursor is an index into a list that just changed under it. A
-		// session moving from Working to Blocked shortens the column it left,
-		// and leaving the row where it was would select a different item —
-		// or nothing — without the user having touched a key.
-		if n := len(m.inColumn(m.col)); m.row >= n {
-			m.row = max(0, n-1)
-		}
+		// Follow the selected item by ID, not position: a refresh reorders
+		// columns by recency, so the same index can name a different session.
+		m.resolve()
 		// A detail pane whose item left the column has nothing to show, and
 		// an open pane reading "nothing selected" is worse than no pane.
 		if _, ok := m.selected(); !ok {
@@ -235,24 +276,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "j", "down":
+		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
-			m.row = (m.row + 1) % n
+			m.setRow((m.row + 1) % n)
 		}
 	case "k", "up":
+		m.resolve()
 		if n := len(m.inColumn(m.col)); n > 0 {
-			m.row = (m.row - 1 + n) % n
+			m.setRow((m.row - 1 + n) % n)
 		}
 	case "h", "left":
 		m.col = (m.col - 1 + len(Columns)) % len(Columns)
-		m.row = clampRow(m.row, len(m.inColumn(m.col)))
+		m.setRow(m.row)
 	case "l", "right":
 		m.col = (m.col + 1) % len(Columns)
-		m.row = clampRow(m.row, len(m.inColumn(m.col)))
+		m.setRow(m.row)
 
 	case "b":
 		// Jump to the first blocked item — the one keystroke that answers
 		// "who is waiting on me" without navigating there.
-		m.col, m.row, m.detail = 0, 0, false
+		m.col, m.detail = 0, false
+		m.setRow(0)
 
 	case "enter", " ":
 		if _, ok := m.selected(); ok {
@@ -263,8 +307,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Group by ticket. Off by default: it only helps once several
 		// sessions share one, and a board of ungrouped items reads worse
 		// with a header above every single row.
+		// The selection survives the reorder: it is the same item, just at a
+		// new position.
 		m.group = !m.group
-		m.row = 0
+		m.resolve()
 
 	case "J":
 		// Capital J, so it cannot be hit while navigating with j.
@@ -297,13 +343,6 @@ func clampRow(row, n int) int {
 		return n - 1
 	}
 	return row
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // ShortAge renders a duration in the least space that stays unambiguous.
