@@ -65,34 +65,31 @@ var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
 // renderHelp is the `?` overlay, derived from the binding table so it cannot
 // drift from what the keys do.
 func (m Model) renderHelp() string {
-	lines, _ := m.helpLines(m.helpOff)
+	lines, _, w, h := m.helpLines(m.helpOff)
 	if lines == nil {
 		return helpBox.Render("? help needs a larger terminal")
 	}
-	return helpBox.Render(strings.Join(lines, "\n"))
+	return render.Box("", strings.Join(lines, "\n"), w, h, helpBox)
 }
 
 // helpLines lays the help page out at offset and returns the offset clamped
-// to the last full page. Update stores that offset, so holding j at the end
-// does not grow it past what k has to undo; View passes the stored one.
-// nil lines mean the terminal is too small for the box.
-func (m Model) helpLines(offset int) ([]string, int) {
+// to the last full page, plus the outer size of the box it fits. Update
+// stores that offset, so holding j at the end does not grow it past what k
+// has to undo; View passes the stored one. nil lines mean the terminal is
+// too small for the box.
+func (m Model) helpLines(offset int) (lines []string, off, w, h int) {
 	sections := m.helpSections()
-	total := 0
-	for i, s := range sections {
-		total += 1 + len(s.Entries) // title + entries
-		if i > 0 {
-			total++ // blank line between sections
-		}
+	// The box keeps 2 cells of margin on each side and is as tall as the
+	// page, up to the screen.
+	w = min(56, m.w-4)
+	cw, _ := render.BoxContent(w, 0, helpBox)
+	h = min(keys.HelpLineCount(sections, cw)+helpBox.GetVerticalFrameSize(), m.h-4)
+	cw, ch := render.BoxContent(w, h, helpBox)
+	if cw < 10 || ch < 1 {
+		return nil, 0, 0, 0
 	}
-	// Content area: the box keeps 2 cells of margin each side and spends 4
-	// on border and padding horizontally, 2 on border vertically.
-	w := min(56, m.w-4) - 4
-	h := min(total, m.h-4-2)
-	if w < 10 || h < 1 {
-		return nil, 0
-	}
-	return keys.RenderHelp(sections, w, h, offset, m.th.HelpStyle())
+	lines, off = keys.RenderHelp(sections, cw, ch, offset, m.th.HelpStyle())
+	return lines, off, w, h
 }
 
 // renderHeader leads with the blocked count, because that is the number the

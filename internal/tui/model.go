@@ -405,9 +405,9 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 		m.toasts, cmd = toast.Release(m.toasts)
 		return m, cmd
 	case actHelpDown:
-		_, m.helpOff = m.helpLines(m.helpOff + 1)
+		_, m.helpOff, _, _ = m.helpLines(m.helpOff + 1)
 	case actHelpUp:
-		_, m.helpOff = m.helpLines(m.helpOff - 1)
+		_, m.helpOff, _, _ = m.helpLines(m.helpOff - 1)
 
 	case actDown:
 		m.resolve()
