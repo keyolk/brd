@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/keyolk/tuikit v0.0.0-20261014154907-35266afa4b70
+	github.com/keyolk/tuikit v0.0.0-20261014163906-74ed59ec17a5
 	modernc.org/sqlite v1.57.0
 )
 
