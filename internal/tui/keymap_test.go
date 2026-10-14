@@ -109,7 +109,8 @@ func TestEscDoesNotQuitTheBoard(t *testing.T) {
 		t.Fatal("esc did not close the detail pane")
 	}
 
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Model{} has the zero Saver, which writes nothing and reports the
+	// final save at once, so this needs no state directory.
 	_, cmd = Model{}.handleKey(keyMsg("q"))
 	if cmd == nil {
 		t.Fatal("q returned no command")
@@ -147,13 +148,9 @@ func quitAfterSave(t *testing.T, m Model, key tea.KeyMsg) (Model, bool) {
 // hides quit or help where they are promised (unless the binding declares
 // it), and no shortcut a Korean input source cannot type.
 func TestKeymapHasNoConflicts(t *testing.T) {
+	// J has g as its Korean-reachable alias; the kit judges reachability per
+	// action, so that alone keeps J out of the report.
 	for _, c := range defaultKeymap().Conflicts(stacks...) {
-		// J keeps its old look in the hint bar; g is the alias a Korean
-		// input source can reach. The kit reports per key, not per action,
-		// so a reachable alias does not excuse it.
-		if c.Kind == keys.Unreachable && c.Key == "J" {
-			continue
-		}
 		t.Error(c)
 	}
 }

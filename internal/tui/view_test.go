@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
-	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/render"
 	"github.com/keyolk/tuikit/toast"
 )
@@ -17,7 +16,8 @@ import (
 // board builds a model with fixed items, bypassing the database. The view is
 // a pure function of the model, so rendering needs no store.
 func board(w, h int, items ...store.Item) Model {
-	return Model{items: items, w: w, h: h, saver: prefs.NewSaver[uiState](appName, 0)}
+	// The zero Saver: board tests never touch $XDG_STATE_HOME.
+	return Model{items: items, w: w, h: h}
 }
 
 func item(id, repo, title, state, blockedOn string, kids ...store.Child) store.Item {

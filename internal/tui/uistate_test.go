@@ -49,6 +49,7 @@ func TestUIStateSurvivesARestart(t *testing.T) {
 func TestStateWritesAreDebounced(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := board(140, 20, item("s1", "/src/a", "a", store.StateWorking, ""))
+	m.saver = prefs.NewSaver[uiState](appName, 0)
 	next, first := m.Update(keyMsg("l"))
 	m = next.(Model)
 	if first == nil {
@@ -162,7 +163,6 @@ func TestHelpOffsetIsClamped(t *testing.T) {
 // quit is in flight must not end the program before the latest state is on
 // disk.
 func TestOnlyTheFinalWriteQuits(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := board(140, 20)
 	m.quitting = true
 	if _, cmd := m.Update(prefs.Saved{App: appName}); cmd != nil {

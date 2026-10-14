@@ -383,9 +383,8 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 		// Write the final state, then quit when the write reports back: a
 		// debounce still pending would otherwise die with the program.
 		m.quitting = true
-		m.saver, _ = m.saver.Save(m.uiState()) // the debounce tick is dropped: Flush supersedes it
 		var cmd tea.Cmd
-		m.saver, cmd = m.saver.Flush()
+		m.saver, cmd = m.saver.FlushWith(m.uiState())
 		return m, cmd
 
 	case actDetailClose:
