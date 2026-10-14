@@ -414,10 +414,12 @@ func (m Model) sharedGroups() bool {
 	for i := range Columns {
 		seen := map[string]bool{}
 		for _, it := range m.inColumn(i) {
-			key := it.GroupKey()
-			if key == "3" {
+			// Ask the item whether it has a group rather than matching the
+			// sort-key prefix GroupKey happens to use for "none".
+			if it.GroupLabel() == "" {
 				continue // nothing to group by
 			}
+			key := it.GroupKey()
 			if seen[key] {
 				return true
 			}
