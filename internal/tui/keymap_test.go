@@ -113,3 +113,28 @@ func TestHangulClosesTheDetailPaneBeforeQuitting(t *testing.T) {
 		t.Fatal("ㅂ (physical q) did not close the detail pane")
 	}
 }
+
+// esc backs out of the detail pane and otherwise does nothing; only q quits.
+func TestEscDoesNotQuitTheBoard(t *testing.T) {
+	m := Model{}
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("esc on the bare board quit the app")
+		}
+	}
+
+	m = Model{detail: true}
+	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if next.(Model).detail {
+		t.Fatal("esc did not close the detail pane")
+	}
+
+	_, cmd = Model{}.handleKey(keyMsg("q"))
+	if cmd == nil {
+		t.Fatal("q returned no command")
+	}
+	if _, quit := cmd().(tea.QuitMsg); !quit {
+		t.Fatal("q on the bare board did not quit")
+	}
+}

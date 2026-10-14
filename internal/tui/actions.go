@@ -55,7 +55,7 @@ func jump(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		pane, ok := paneFor(sessionID)
 		if !ok {
-			return jumpMsg{err: fmt.Errorf("no live tmux pane for this session")}
+			return jumpMsg{err: fmt.Errorf("no live tmux pane for this session — R resumes it instead")}
 		}
 		if err := exec.Command("tmux", "select-window", "-t", pane).Run(); err != nil {
 			return jumpMsg{err: fmt.Errorf("select-window: %w", err)}

@@ -591,3 +591,23 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// J must not shell out to tmux inside Update. With TMUX unset paneFor fails
+// fast, so the only way the status could be set synchronously is a pre-check;
+// the handler must instead hand back jump()'s command and leave the verdict to
+// jumpMsg.
+func TestJumpDoesNotCheckThePaneInsideUpdate(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := board(140, 20, item("s1", "/src/a", "a", store.StateWaiting, "idle_prompt"))
+	next, cmd := m.handleKey(keyMsg("J"))
+	if got := next.(Model).status; got != "" {
+		t.Errorf("status set synchronously by J: %q", got)
+	}
+	if cmd == nil {
+		t.Fatal("J returned no command")
+	}
+	msg, ok := cmd().(jumpMsg)
+	if !ok || msg.err == nil || !strings.Contains(msg.err.Error(), "R resumes it instead") {
+		t.Errorf("jump() result = %#v, want an error pointing at R", msg)
+	}
+}

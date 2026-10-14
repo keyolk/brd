@@ -220,12 +220,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	msg = normalizeCJKKey(msg)
 
 	switch msg.String() {
-	case "q", "ctrl+c", "esc":
+	case "q", "ctrl+c":
 		if m.detail {
 			m.detail = false
 			return m, nil
 		}
 		return m, tea.Quit
+
+	case "esc":
+		// esc only closes. It is the key people press to back out of
+		// something, and on the bare board that used to quit the app — one
+		// reflexive keystroke too many lost the board entirely.
+		m.detail = false
+		return m, nil
 
 	case "j", "down":
 		if n := len(m.inColumn(m.col)); n > 0 {
@@ -261,11 +268,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "J":
 		// Capital J, so it cannot be hit while navigating with j.
+		// No liveness pre-check here: paneFor shells out to tmux, and Update
+		// must not block on a subprocess (a wedged tmux server would freeze
+		// the board). jump() does the same lookup off the UI goroutine and
+		// reports a missing pane through jumpMsg.
 		if it, ok := m.selected(); ok {
-			if _, live := paneFor(it.ID); !live {
-				m.status = "no live tmux pane — R resumes it instead"
-				return m, nil
-			}
 			m.status = ""
 			return m, jump(it.ID)
 		}
