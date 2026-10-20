@@ -18,6 +18,7 @@ import (
 	"github.com/keyolk/brd/internal/pulls"
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/mouse"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/theme"
 	"github.com/keyolk/tuikit/tmux"
@@ -122,6 +123,11 @@ type Model struct {
 	// keeps that write's failure for the caller once the screen is gone.
 	quitting bool
 	saveErr  error
+
+	// clicks detects a second click on the selected card; now is its clock,
+	// nil meaning time.Now, so tests can place two clicks on purpose.
+	clicks mouse.Clicks
+	now    func() time.Time
 }
 
 // New builds the board model, with the user's key overrides and the UI state
@@ -369,6 +375,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 	return m, nil
 }

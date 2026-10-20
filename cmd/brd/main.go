@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/keyolk/tuikit/mouse"
 	"io"
 	"os"
 	"sort"
@@ -79,7 +80,7 @@ func runTUI() error {
 		return err
 	}
 	defer db.Close()
-	p := tea.NewProgram(tui.New(db), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(db), append([]tea.ProgramOption{tea.WithAltScreen()}, mouse.ProgramOptions()...)...)
 	final, err := p.Run()
 	if err != nil {
 		return err
