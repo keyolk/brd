@@ -80,6 +80,29 @@ func TestSecondClickOnTheSelectedCardOpensDetail(t *testing.T) {
 	}
 }
 
+// A key between two clicks breaks the pair. Click a card, j, k back to it,
+// click again inside the double-click window: that is a fresh first click,
+// so it selects and must not open the detail pane.
+func TestKeyBetweenClicksBreaksTheDoubleClick(t *testing.T) {
+	m := mouseBoard()
+	x, y := at(t, m, "beta task")
+	m = click(m, x, y)
+	for _, k := range []string{"j", "k"} {
+		next, _ := m.Update(keyMsg(k))
+		m = next.(Model)
+	}
+	if m.sel != "w2" {
+		t.Fatalf("sel=%q after j, k; want back on w2", m.sel)
+	}
+	m = click(m, x, y)
+	if m.detail {
+		t.Fatal("a key between the clicks must break the double click; detail opened")
+	}
+	if m.sel != "w2" {
+		t.Fatalf("sel=%q, want w2 still selected", m.sel)
+	}
+}
+
 func TestClickInAnotherColumnFocusesIt(t *testing.T) {
 	m := mouseBoard()
 	x, y := at(t, m, "idle task")
