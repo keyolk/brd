@@ -115,11 +115,17 @@ func (m *Model) focus(col int) {
 // full-width column when the terminal is too narrow for four. It reads the
 // same model state renderColumns does, so hit tests and drawing agree.
 func (m Model) columnRects() []mouse.Rect {
-	body := mouse.Rect{X: 0, Y: 1, W: m.w, H: m.bodyHeight()}
+	body := m.bodyRect()
 	if (m.w-(len(Columns)-1))/len(Columns) < minColWidth {
 		return []mouse.Rect{body}
 	}
 	return mouse.SplitColumns(body, len(Columns), 1)
+}
+
+// bodyRect is the area between the header and the bottom bar, where View
+// draws the columns or the detail pane.
+func (m Model) bodyRect() mouse.Rect {
+	return mouse.Rect{X: 0, Y: 1, W: m.w, H: m.bodyHeight()}
 }
 
 // cardHit maps a click inside column col (drawn in r) to a card. The card

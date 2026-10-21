@@ -20,6 +20,7 @@ import (
 	"github.com/keyolk/tuikit/keys"
 	"github.com/keyolk/tuikit/mouse"
 	"github.com/keyolk/tuikit/prefs"
+	"github.com/keyolk/tuikit/selection"
 	"github.com/keyolk/tuikit/theme"
 	"github.com/keyolk/tuikit/tmux"
 	"github.com/keyolk/tuikit/toast"
@@ -128,6 +129,9 @@ type Model struct {
 	// nil meaning time.Now, so tests can place two clicks on purpose.
 	clicks mouse.Clicks
 	now    func() time.Time
+	// textSel is the drag selection (selection.go); sel above is the card
+	// cursor, a different thing.
+	textSel selection.Selection
 }
 
 // New builds the board model, with the user's key overrides and the UI state
@@ -377,9 +381,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A key between two clicks breaks the pair: click, move away and back
 		// by keyboard, click again must not count as a double click.
 		m.clicks = mouse.Clicks{}
+		// A key is the "next action" that ends a selection, as in the mod
+		// engine; it is cleared here, not in handleKey, for the same reason.
+		m.textSel.Clear()
 		return m.handleKey(msg)
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		return m.selectionMouse(msg)
+	case selection.CopiedMsg:
+		return m.copied(msg)
 	}
 	return m, nil
 }
