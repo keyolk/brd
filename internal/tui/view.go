@@ -50,13 +50,19 @@ func (m Model) View() string {
 	} else {
 		body = m.renderColumns(bodyH)
 	}
-	frame := header + "\n" + body + "\n" + hints
-	if !m.help {
-		return frame
+	// The body is padded to its full height so the bottom bar always sits
+	// below bodyRect: a short detail pane otherwise pulled the hints up into
+	// the rect the selection treats as the detail pane.
+	if n := lipgloss.Height(body); n < bodyH {
+		body += strings.Repeat("\n", bodyH-n)
 	}
-	// Over the board, not instead of it: the user keeps sight of what the
-	// keys act on.
-	return render.Center(render.Dim(frame), m.renderHelp(), m.w, m.h)
+	frame := header + "\n" + body + "\n" + hints
+	if m.help {
+		// Over the board, not instead of it: the user keeps sight of what
+		// the keys act on.
+		frame = render.Center(render.Dim(frame), m.renderHelp(), m.w, m.h)
+	}
+	return m.textSel.Render(frame, m.selPanes(), m.selectionStyle())
 }
 
 var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
