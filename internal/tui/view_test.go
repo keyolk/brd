@@ -43,11 +43,24 @@ func TestNoLineExceedsTerminalWidth(t *testing.T) {
 			store.Child{Kind: "shell", Ref: "t1", Label: "go test ./... -race", State: "running"}),
 		item("s4", "/src/keyolk/okx", "watch", store.StateDone, ""),
 	}
+	// A PR badge and the detail pane's PR rows are OSC 8 links, which must
+	// take no width.
+	items[0].Branch = "fix-review"
+	prs := []store.Pull{{Branch: "fix-review", Number: 90, State: "OPEN", Checks: "failing",
+		Title: "a pull request title long enough to be cut in the detail pane",
+		URL:   "https://github.com/keyolk/ghx/pull/90"}}
 	for _, w := range widths {
 		m := board(w, 24, items...)
-		for i, line := range strings.Split(m.View(), "\n") {
-			if got := lipglossWidth(line); got > w {
-				t.Errorf("width %d: line %d is %d cols wide:\n%s", w, i, got, line)
+		m.pulls = prs
+		if !strings.Contains(m.View(), "\x1b]8;;"+prs[0].URL) {
+			t.Fatalf("width %d: the PR badge is not linked", w)
+		}
+		for _, detail := range []bool{false, true} {
+			m.detail, m.col, m.row = detail, 0, 0
+			for i, line := range strings.Split(m.View(), "\n") {
+				if got := lipglossWidth(line); got > w {
+					t.Errorf("width %d detail=%v: line %d is %d cols wide:\n%s", w, detail, i, got, line)
+				}
 			}
 		}
 	}

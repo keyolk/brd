@@ -199,6 +199,7 @@ brd ls       # the board as text, for a scratch pane or a status line
 | `b` | jump to the first blocked item |
 | `J` / `g` | switch to the session's tmux pane (`g` works under a Korean input source, `J` does not) |
 | `R` | resume the session in this terminal |
+| `o` | open the card's PR (the one its badge names) or a URL from its last message; with several, the first, and says how many |
 | `t` | group by JIRA ticket |
 | `r` | refresh now |
 | `esc` | close the detail pane or help |

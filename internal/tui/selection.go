@@ -2,13 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/tuikit/keys"
-	"github.com/keyolk/tuikit/mouse"
-	"github.com/keyolk/tuikit/render"
 	"github.com/keyolk/tuikit/selection"
 	"github.com/keyolk/tuikit/toast"
 )
@@ -25,54 +21,38 @@ import (
 //     its edge scrolls it the way the wheel does. While it is open it is the
 //     only pane: the dimmed board under it is not selectable.
 
-// selectionMouse feeds msg to the selection before the click handler. A press
-// that does not move is left to handleMouse, so click-to-select still works;
-// only what the selection consumed (a drag, its release, a word pick) skips it.
-func (m Model) selectionMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+// selectionMouse feeds a mouse event or an auto-scroll tick to the selection
+// before the click handler. A press that does not move is left to
+// handleMouse, so click-to-select still works; only what the selection
+// consumed (a drag, its release, a word pick) skips it.
+func (m Model) selectionMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitting || m.w == 0 {
 		return m, nil
 	}
-	r := m.textSel.Mouse(msg, m.selPanes(), m.View(), m.clock())
-	var cmds []tea.Cmd
-	next := tea.Model(m)
-	if r.Scroll != 0 {
-		next = m.scrollPane(r.ScrollPane, r.Scroll)
+	r, cmd := m.textSel.Update(msg, m.selPanes, m.View, m.clock())
+	if r.Scroll != 0 && r.ScrollPane == helpPaneID {
+		// Set through the clamp the help keys use: past the last page the
+		// kit's offset can be one more than RenderHelp draws, and a stored
+		// unclamped value would make the next drag up a no-op.
+		_, m.helpOff, _, _ = m.helpLines(r.Offset)
 	}
-	if r.Copy != "" {
-		cmds = append(cmds, selection.Copy(r.Copy))
+	mm, isMouse := msg.(tea.MouseMsg)
+	if r.Consumed || !isMouse {
+		return m, cmd
 	}
-	if r.Consumed {
-		return next, tea.Batch(cmds...)
-	}
-	next, cmd := next.(Model).handleMouse(msg)
-	return next, tea.Batch(append(cmds, cmd)...)
-}
-
-// scrollPane scrolls a pane by n lines through the same actions the wheel
-// runs, so a drag cannot scroll further than a key could.
-func (m Model) scrollPane(id string, n int) tea.Model {
-	if id != helpPaneID {
-		return m
-	}
-	act := actHelpDown
-	if n < 0 {
-		act, n = actHelpUp, -n
-	}
-	next := tea.Model(m)
-	for range n {
-		next, _ = next.(Model).run(act)
-	}
-	return next
+	next, click := m.handleMouse(mm)
+	return next, tea.Batch(cmd, click)
 }
 
 // copied turns the clipboard write's outcome into a toast: a copy is silent
 // otherwise, and a failed one (no pbcopy, no /dev/tty) must not look like a
 // success.
 func (m Model) copied(msg selection.CopiedMsg) (tea.Model, tea.Cmd) {
+	lvl := toast.Info
 	if msg.Err != nil {
-		return m, m.notify("copy", toast.Error, "copy failed: "+msg.Err.Error())
+		lvl = toast.Error
 	}
-	return m, m.notify("copy", toast.Info, fmt.Sprintf("copied %d chars", utf8.RuneCountInString(msg.Text)))
+	return m, m.notify("copy", lvl, msg.Note())
 }
 
 const helpPaneID = "help"
@@ -109,28 +89,17 @@ func (m Model) helpPane() (selection.Pane, bool) {
 	if box.W == 0 {
 		return selection.Pane{}, false
 	}
-	cw, ch := render.BoxContent(box.W, box.H, helpBox)
-	sections := m.helpSections()
-	all, _ := keys.RenderHelp(sections, cw, keys.HelpLineCount(sections, cw), 0, m.th.HelpStyle())
-	content := mouse.Rect{
-		X: box.X + helpBox.GetMarginLeft() + helpBox.GetBorderLeftSize() + helpBox.GetPaddingLeft(),
-		Y: box.Y + helpBox.GetMarginTop() + helpBox.GetBorderTopSize() + helpBox.GetPaddingTop(),
-		W: cw, H: ch,
-	}
-	if len(all)-m.helpOff > ch {
+	content := box.InsetStyle(helpBox)
+	all := keys.HelpLines(m.helpSections(), content.W, m.th.HelpStyle())
+	// The offset View draws at: helpOff clamped to the last page. A stored
+	// value past it (restored state, a resize that made the page taller)
+	// would make the pane's lines disagree with the screen.
+	_, off, _, _ := m.helpLines(m.helpOff)
+	if len(all)-off > content.H {
 		// RenderHelp spends the last row on "… N more" while lines remain
 		// below. That row is not Lines[Offset+ch-1], so it is left out of the
 		// pane: a drag onto it scrolls instead of selecting a hidden line.
 		content.H--
 	}
-	return selection.Pane{ID: helpPaneID, Rect: content, Kind: selection.Text, Lines: all, Offset: m.helpOff}, true
-}
-
-// selectionStyle is reverse video: it reads on any palette and survives
-// NO_COLOR, where the theme's renderer keeps attributes but drops colors.
-func (m Model) selectionStyle() lipgloss.Style {
-	if r := m.th.Renderer(); r != nil {
-		return r.NewStyle().Reverse(true)
-	}
-	return lipgloss.NewStyle().Reverse(true)
+	return selection.Pane{ID: helpPaneID, Rect: content, Kind: selection.Text, Lines: all, Offset: off}, true
 }

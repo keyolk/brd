@@ -51,6 +51,7 @@ func defaultKeymap() keys.Keymap {
 		// reachable alias; J stays first so the hint keeps its old look.
 		keys.Binding{Action: actJump, Keys: []string{"J", "g"}, Ctx: ctxBoard, Group: "Act", Help: "jump", Footer: 2},
 		keys.Binding{Action: actResume, Keys: []string{"R"}, Ctx: ctxBoard, Group: "Act", Help: "resume", Footer: 3},
+		openLinkBinding(),
 		keys.Binding{Action: actBlocked, Keys: []string{"b"}, Ctx: ctxBoard, Group: "Move", Help: "blocked", Footer: 4},
 		// One action whose label follows the board: the hint says which way
 		// t goes, so it reads "ungroup" once the board is grouped.

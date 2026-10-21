@@ -1,26 +1,33 @@
 package tui
 
 import (
-	"io"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/keyolk/tuikit/theme"
-	"github.com/muesli/termenv"
+	"github.com/keyolk/tuikit/selection"
+	"github.com/keyolk/tuikit/tuitest"
 )
 
-// selBoard is mouseBoard with a renderer that emits SGR, so the reverse-video
-// highlight is visible in View() and its cells can be located.
-func selBoard() Model {
-	m := mouseBoard()
-	r := lipgloss.NewRenderer(io.Discard)
-	r.SetColorProfile(termenv.ANSI)
-	m.th = theme.NewWith(r, theme.DefaultRoles(), theme.Glyphs{})
-	return m
+// selBoard is mouseBoard; the highlight is selection.DefaultStyle, which
+// emits reverse video under any color profile, so tests see it without a
+// theme renderer of their own.
+func selBoard() Model { return mouseBoard() }
+
+// captureCopies replaces the clipboard with a recorder, so a test runs the
+// copy command the app returned and asserts what reached the clipboard.
+func captureCopies(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	old := selection.Clipboard
+	selection.Clipboard = func(s string) error {
+		got = append(got, s)
+		return nil
+	}
+	t.Cleanup(func() { selection.Clipboard = old })
+	return &got
 }
 
 func send(m Model, msg tea.Msg) (Model, tea.Cmd) {
@@ -40,60 +47,11 @@ func mrelease(x, y int) tea.MouseMsg {
 	return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease}
 }
 
-// span is one run of reverse-video cells in a rendered frame.
-type span struct {
-	y, x0, x1 int // x1 exclusive
-	text      string
-}
-
-// highlighted finds the reverse-video runs Render drew.
-func highlighted(view string) []span {
-	const on, off = "\x1b[7m", "\x1b[0m"
-	var out []span
-	for y, line := range strings.Split(view, "\n") {
-		rest, base := line, 0
-		for {
-			i := strings.Index(rest, on)
-			if i < 0 {
-				break
-			}
-			x0 := base + ansi.StringWidth(ansi.Strip(rest[:i]))
-			body := rest[i+len(on):]
-			j := strings.Index(body, off)
-			if j < 0 {
-				j = len(body)
-			}
-			text := ansi.Strip(body[:j])
-			w := ansi.StringWidth(text)
-			out = append(out, span{y, x0, x0 + w, text})
-			base = x0 + w
-			rest = body[j:]
-		}
-	}
-	return out
-}
-
-// sepAfter is the screen column of the first separator right of x on row y,
-// as View drew it.
-func sepAfter(t *testing.T, m Model, x, y int) int {
-	t.Helper()
-	plain := []rune(ansi.Strip(strings.Split(m.View(), "\n")[y]))
-	col := 0
-	for _, r := range plain {
-		if col > x && r == '│' {
-			return col
-		}
-		col += ansi.StringWidth(string(r))
-	}
-	t.Fatalf("no separator right of %d on row %d", x, y)
-	return 0
-}
-
 func TestDragStaysInsideTheColumnUnderThePress(t *testing.T) {
+	copies := captureCopies(t)
 	m := selBoard()
 	ax, ay := at(t, m, "alpha task")
 	ix, iy := at(t, m, "idle task")
-	sep := sepAfter(t, m, ax, ay)
 
 	m, _ = send(m, mpress(ax, ay))
 	m, _ = send(m, mmotion(ix+4, iy+1)) // deep into the Idle column
@@ -101,21 +59,30 @@ func TestDragStaysInsideTheColumnUnderThePress(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("a finished drag must return the copy command")
 	}
-	got := m.textSel.Text(m.selPanes(), m.View())
+	for _, msg := range tuitest.Drain(cmd, 0) {
+		m, _ = send(m, msg)
+	}
+	if len(*copies) != 1 {
+		t.Fatalf("the release copied %d times, want once", len(*copies))
+	}
+	got := (*copies)[0]
 	if !strings.Contains(got, "alpha task") {
 		t.Fatalf("copy %q lacks the dragged card", got)
 	}
 	if strings.Contains(got, "idle") || strings.Contains(got, "│") {
 		t.Fatalf("copy %q leaked the neighbor column or the separator", got)
 	}
-	spans := highlighted(m.View())
-	if len(spans) == 0 {
+	runs := tuitest.Reversed(m.View())
+	if len(runs) == 0 {
 		t.Fatal("the selection is not drawn")
 	}
-	for _, s := range spans {
-		if s.x1 > sep || strings.Contains(s.text, "│") {
-			t.Fatalf("highlight %+v crosses the separator at x=%d", s, sep)
+	for _, r := range runs {
+		if strings.Contains(r, "│") || strings.Contains(r, "idle") {
+			t.Fatalf("highlight %q crosses the separator into the next column", r)
 		}
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "copied ") {
+		t.Fatal("the copy should show its toast")
 	}
 }
 
@@ -127,7 +94,7 @@ func TestPressWithoutMotionIsStillAClick(t *testing.T) {
 	if m.sel != "w3" {
 		t.Fatalf("sel=%q, want w3: a still press is the app's click", m.sel)
 	}
-	if m.textSel.Active() || len(highlighted(m.View())) != 0 {
+	if m.textSel.Active() || len(tuitest.Reversed(m.View())) != 0 {
 		t.Fatal("a click without motion must not leave a selection")
 	}
 }
@@ -156,7 +123,7 @@ func TestKeyClearsTheSelection(t *testing.T) {
 		t.Fatal("setup: the drag should leave a selection")
 	}
 	m, _ = send(m, keyMsg("j"))
-	if m.textSel.Active() || len(highlighted(m.View())) != 0 {
+	if m.textSel.Active() || len(tuitest.Reversed(m.View())) != 0 {
 		t.Fatal("a key must clear the selection")
 	}
 }
@@ -171,7 +138,8 @@ func TestDragPastTheHelpBottomScrollsAndKeepsScrolledOutLines(t *testing.T) {
 		t.Fatal("setup: next column should be below the help page")
 	}
 	m, _ = send(m, mpress(x, y))
-	for range 4 {
+	// One motion per line: a drag past the edge scrolls one line per event.
+	for range 5 {
 		m, _ = send(m, mmotion(x+40, bottom))
 	}
 	if m.helpOff == 0 {
@@ -200,7 +168,7 @@ func TestBoardUnderHelpIsNotSelectable(t *testing.T) {
 	m, _ = send(m, mpress(x, y))
 	m, _ = send(m, mmotion(x+5, y+1))
 	m, _ = send(m, mrelease(x+5, y+1))
-	if m.textSel.Active() || len(highlighted(m.View())) != 0 {
+	if m.textSel.Active() || len(tuitest.Reversed(m.View())) != 0 {
 		t.Fatal("the board under the help overlay must not be selectable")
 	}
 }

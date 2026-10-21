@@ -7,7 +7,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/link"
 	"github.com/keyolk/tuikit/render"
+	"github.com/keyolk/tuikit/selection"
 	"github.com/keyolk/tuikit/theme"
 	"github.com/keyolk/tuikit/toast"
 )
@@ -62,7 +64,8 @@ func (m Model) View() string {
 		// the keys act on.
 		frame = render.Center(render.Dim(frame), m.renderHelp(), m.w, m.h)
 	}
-	return m.textSel.Render(frame, m.selPanes(), m.selectionStyle())
+	// Reverse video that survives NO_COLOR: reverse is not a color.
+	return m.textSel.Render(frame, m.selPanes(), selection.DefaultStyle())
 }
 
 var helpBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
@@ -422,12 +425,16 @@ func (m Model) renderCard(it store.Item, selected bool, w int) []string {
 	// A PR gets its own line rather than being crammed onto the meta line:
 	// it is a different clock (someone else's review, not this session's
 	// turn) and burying it would defeat the point of tracking it.
-	if badge, attention := PullBadge(m.pullsFor(it)); badge != "" {
-		style := dim
-		if attention {
-			style = lipgloss.NewStyle().Foreground(blockedFg)
+	if prs := m.pullsFor(it); len(prs) > 0 {
+		if badge, attention := PullBadge(prs); badge != "" {
+			style := dim
+			if attention {
+				style = lipgloss.NewStyle().Foreground(blockedFg)
+			}
+			// The badge names one PR; it links to that PR (E11).
+			pick, _ := badgePull(prs)
+			lines = append(lines, "  "+style.Render(link.Wrap(pick.URL, render.Truncate(badge, w-2))))
 		}
-		lines = append(lines, "  "+style.Render(render.Truncate(badge, w-2)))
 	}
 	return lines
 }
@@ -568,7 +575,9 @@ func (m Model) renderDetail(height int) string {
 			if p.State == "OPEN" {
 				state = fmt.Sprintf("%s · %s", reviewLabel(p.Review), p.Checks)
 			}
-			line := fmt.Sprintf("#%-6d %s %s", p.Number, render.PadRight(render.Truncate(p.Title, 34), 34), state)
+			// Only the title text is the link, not the padding after it.
+			title := link.Wrap(p.URL, render.Truncate(p.Title, 34))
+			line := fmt.Sprintf("#%-6d %s %s", p.Number, render.PadRight(title, 34), state)
 			style := lipgloss.NewStyle()
 			if p.Attention() {
 				style = style.Foreground(blockedFg)

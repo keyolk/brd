@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.6
-	github.com/keyolk/tuikit v0.0.0-20261021024723-c19aa4f0fc4c
+	github.com/keyolk/tuikit v0.0.0-20261021072447-990d9a910213
 	github.com/muesli/termenv v0.16.0
 	modernc.org/sqlite v1.57.0
 )

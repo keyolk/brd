@@ -18,6 +18,7 @@ import (
 	"github.com/keyolk/brd/internal/pulls"
 	"github.com/keyolk/brd/internal/store"
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/link"
 	"github.com/keyolk/tuikit/mouse"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/selection"
@@ -385,10 +386,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// engine; it is cleared here, not in handleKey, for the same reason.
 		m.textSel.Clear()
 		return m.handleKey(msg)
-	case tea.MouseMsg:
+	case tea.MouseMsg, selection.AutoScrollMsg:
 		return m.selectionMouse(msg)
 	case selection.CopiedMsg:
 		return m.copied(msg)
+	case link.OpenedMsg:
+		lvl := toast.Info
+		if msg.Err != nil {
+			lvl = toast.Error
+		}
+		return m, m.notify("link", lvl, msg.Note())
 	}
 	return m, nil
 }
@@ -492,6 +499,8 @@ func (m Model) run(action string) (tea.Model, tea.Cmd) {
 		if it, ok := m.selected(); ok {
 			return m, resume(it)
 		}
+	case link.Action:
+		return m.openLink()
 
 	case actRefresh:
 		return m, m.load()
@@ -560,9 +569,30 @@ func PullsFor(it store.Item, all []store.Pull) []store.Pull {
 // only when nothing else is open, because "it landed" is the answer you want
 // right after a session goes quiet.
 func PullBadge(prs []store.Pull) (text string, attention bool) {
-	if len(prs) == 0 {
+	pick, ok := badgePull(prs)
+	if !ok {
 		return "", false
 	}
+	label := fmt.Sprintf("#%d", pick.Number)
+	switch {
+	case pick.State == "MERGED":
+		return label + " merged", false
+	case pick.Checks == "failing":
+		return label + " checks failing", true
+	case pick.Review == "CHANGES_REQUESTED":
+		return label + " changes requested", true
+	case pick.Review == "APPROVED":
+		return label + " approved", false
+	case pick.Checks == "pending":
+		return label + " checks running", false
+	}
+	return label + " in review", false
+}
+
+// badgePull is the PR the badge names: the first open one that needs the
+// user, else the first open one, else the first merged one. The badge text
+// and its link both come from it, so the link always opens the PR named.
+func badgePull(prs []store.Pull) (store.Pull, bool) {
 	var open, merged []store.Pull
 	for _, p := range prs {
 		switch p.State {
@@ -574,29 +604,16 @@ func PullBadge(prs []store.Pull) (text string, attention bool) {
 	}
 	if len(open) == 0 {
 		if len(merged) > 0 {
-			return fmt.Sprintf("#%d merged", merged[0].Number), false
+			return merged[0], true
 		}
-		return "", false
+		return store.Pull{}, false
 	}
-	pick := open[0]
 	for _, p := range open {
 		if p.Attention() {
-			pick = p
-			break
+			return p, true
 		}
 	}
-	label := fmt.Sprintf("#%d", pick.Number)
-	switch {
-	case pick.Checks == "failing":
-		return label + " checks failing", true
-	case pick.Review == "CHANGES_REQUESTED":
-		return label + " changes requested", true
-	case pick.Review == "APPROVED":
-		return label + " approved", false
-	case pick.Checks == "pending":
-		return label + " checks running", false
-	}
-	return label + " in review", false
+	return open[0], true
 }
 
 // sharedGroups reports whether any group covers more than one item — the only
